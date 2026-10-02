@@ -8,6 +8,7 @@ local Config = {
     ToggleKey = Enum.KeyCode.RightShift,
     FlyKey = Enum.KeyCode.F,
     CobaltUrl = "https://gitlab.com/upio/cobalt/-/releases/permalink/latest/downloads/Cobalt.luau",
+    DexUrl = "https://github.com/AZYsGithub/DexPlusPlus/releases/download/stable-3.0/out.lua",
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
@@ -60,14 +61,13 @@ local Window
 local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
 local lastExportPath
-local uiPreviewGui, uiPreviewBox, uiPreviewLabel, hoveredUI, lastPickedUI
 local selected, selectionHighlights = {}, {}
-local selectionSummary, uiDropdown, uiEntries, uiChoice
+local selectionSummary
 local selectedDropdown, selectedDetails, selectedEntries, selectionChoice, historyStatus
-local exportLayout, customFilename, wrapFragments, cancelExport = "Together", "", false, false
+local exportLayout, customFilename, cancelExport = "Together", "", false
 local exportHistory = {}
 local clearSelection, refreshSelection
-local cobaltBusy, cobaltLoaded = false, false
+local cobaltBusy, dexBusy = false, false
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -125,7 +125,21 @@ end
 local function launchCobalt()
     if not Session.Alive then return end
     if cobaltBusy then notify("Cobalt is loading."); return end
-    if cobaltLoaded then notify("Cobalt already launched in this session."); return end
+    local active = env.Cobalt and env.Cobalt.shared
+    if active and not active.Unloaded then
+        local ok, err = pcall(function()
+            local screen = active.ScreenGui
+            assert(screen and screen.Parent, "Cobalt is still initializing or its UI is unavailable")
+            screen.Enabled = true
+            local shown = false
+            for _, child in ipairs(screen:GetChildren()) do
+                if child:IsA("Frame") and not shown then child.Visible, shown = true, true end
+                if child:IsA("TextButton") then child.Visible = false end
+            end
+        end)
+        notify(ok and "Cobalt reopened." or tostring(err))
+        return
+    end
     cobaltBusy = true
     task.spawn(function()
         local ok, result = pcall(function()
@@ -139,12 +153,53 @@ local function launchCobalt()
         cobaltBusy = false
         if not Session.Alive then return end
         if ok and result then
-            cobaltLoaded = true
             notify("Cobalt launch script completed.")
         else
             log("Cobalt launch error: " .. tostring(result))
             notify("Cobalt failed to load. Check Session log, then retry.")
         end
+    end)
+end
+
+local function toolContainers()
+    local roots, seen = {}, {}
+    local function add(root) if root and not seen[root] then roots[#roots + 1], seen[root] = root, true end end
+    add(Player:FindFirstChild("PlayerGui"))
+    local ok, core = pcall(game.GetService, game, "CoreGui")
+    if ok then add(core) end
+    if type(gethui) == "function" then local accessible, root = pcall(gethui); if accessible then add(root) end end
+    return roots
+end
+
+local function launchDex()
+    if not Session.Alive then return end
+    if dexBusy then notify("Dex++ is loading."); return end
+    local running = false
+    for _, container in ipairs(toolContainers()) do
+        local ok, objects = pcall(container.GetDescendants, container)
+        if ok then
+            for _, object in ipairs(objects) do
+                if object:IsA("ScreenGui") and object.Name:sub(1, 5) == "_DPP_" then
+                    running, object.Enabled = true, true
+                    local openButton = object:FindFirstChild("OpenButton")
+                    if openButton then openButton.Visible = true end
+                end
+            end
+        end
+    end
+    if running then notify("Dex++ is running. Use its Dex++ button at the top to open Explorer."); return end
+    dexBusy = true
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local source = game:HttpGet(Config.DexUrl)
+            if not Session.Alive then return end
+            local chunk, compileError = loadstring(source)
+            assert(type(chunk) == "function", compileError or "Invalid Dex++ script")
+            chunk()
+        end)
+        dexBusy = false
+        if not Session.Alive then return end
+        notify(ok and "Dex++ launch script completed." or ("Dex++ failed to load: " .. tostring(err)))
     end)
 end
 
@@ -288,7 +343,6 @@ local function cleanup()
     Session.Alive = false
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if pickerHighlight then pickerHighlight:Destroy(); pickerHighlight = nil end
-    if uiPreviewGui then uiPreviewGui:Destroy(); uiPreviewGui = nil end
     if clearSelection then clearSelection() end
     for i = #cleanups, 1, -1 do
         local ok, err = pcall(cleanups[i])
@@ -345,46 +399,11 @@ local function overHub(position)
         and position.Y >= origin.Y and position.Y <= origin.Y + size.Y
 end
 
-local function uiMode()
-    return state.PickMode == "Whole ScreenGui" or state.PickMode == "UI panel" or state.PickMode == "UI element"
-end
-
 local function ownUI(object)
-    if uiPreviewGui and (object == uiPreviewGui or object:IsDescendantOf(uiPreviewGui)) then return true end
     local main = Window and Window.UIElements and Window.UIElements.Main
     if not main or not main.FindFirstAncestorOfClass then return false end
     local screen = main:FindFirstAncestorOfClass("ScreenGui")
     return screen and (object == screen or object:IsDescendantOf(screen)) or false
-end
-
-local function pickUI(position)
-    if overHub(position) then return nil end
-    local roots = { Player:FindFirstChild("PlayerGui") }
-    local ok, core = pcall(game.GetService, game, "CoreGui")
-    if ok and core then roots[#roots + 1] = core end
-    for _, container in ipairs(roots) do
-        local accessible, objects = pcall(container.GetGuiObjectsAtPosition, container, position.X, position.Y)
-        if accessible then
-            for _, object in ipairs(objects) do
-                if not ownUI(object) then
-                    if state.PickMode == "Whole ScreenGui" then return object:FindFirstAncestorOfClass("ScreenGui") end
-                    if state.PickMode == "UI panel" then
-                        local candidate, cursor = object, object
-                        local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-                        while cursor and cursor:IsA("GuiObject") do
-                            local size = cursor.AbsoluteSize
-                            if cursor:IsA("Frame") or cursor:IsA("ScrollingFrame") or cursor:IsA("CanvasGroup") then
-                                if size and size.X > 0 and size.Y > 0 and (not viewport or size.X < viewport.X * 0.95 or size.Y < viewport.Y * 0.95) then candidate = cursor end
-                            end
-                            cursor = cursor.Parent
-                        end
-                        return candidate
-                    end
-                    return object
-                end
-            end
-        end
-    end
 end
 
 refreshSelection = function()
@@ -416,7 +435,6 @@ end
 clearSelection = function()
     for _, highlight in pairs(selectionHighlights) do highlight:Destroy() end
     selected, selectionHighlights = {}, {}
-    lastPickedUI = nil
     refreshSelection()
 end
 
@@ -425,7 +443,6 @@ local function toggleSelection(target)
     for i, object in ipairs(selected) do
         if object == target then
             table.remove(selected, i)
-            if lastPickedUI == target then lastPickedUI = nil end
             if selectionHighlights[target] then selectionHighlights[target]:Destroy(); selectionHighlights[target] = nil end
             refreshSelection()
             exportMessage("Removed " .. target.Name, "Click the same target again to select it.")
@@ -434,7 +451,6 @@ local function toggleSelection(target)
     end
     if #selected >= 64 then notify("Selection limit reached: 64 targets. Export or clear the selection first."); return end
     selected[#selected + 1] = target
-    if target:IsA("GuiObject") or target:IsA("ScreenGui") then lastPickedUI = target end
     if target:IsA("Model") or target:IsA("BasePart") then
         local highlight = Instance.new("Highlight")
         highlight.Name, highlight.Adornee = "ParawareSelected", target
@@ -442,43 +458,23 @@ local function toggleSelection(target)
         highlight.FillTransparency, highlight.OutlineTransparency = 0.8, 0.1
         highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.Occluded, workspace
         selectionHighlights[target] = highlight
-    elseif target:IsA("GuiObject") and uiPreviewGui then
-        local outline = Instance.new("Frame")
-        outline.Name, outline.BackgroundTransparency, outline.BorderSizePixel = "SelectedUIOutline", 1, 2
-        outline.BorderColor3, outline.Active, outline.Visible = Color3.fromHex("#9BC9FF"), false, false
-        outline.Parent = uiPreviewGui
-        selectionHighlights[target] = outline
+
     end
     refreshSelection()
     exportMessage("Added " .. target.Name, "Click again to unselect. Use Export selected when ready.")
 end
 
-local function refreshUIBrowser()
-    uiEntries, uiChoice = {}, nil
-    local values, roots = {}, { Player:FindFirstChild("PlayerGui") }
-    local ok, core = pcall(game.GetService, game, "CoreGui")
-    if ok and core then roots[#roots + 1] = core end
-    local seen = {}
-    for _, container in ipairs(roots) do
-        local readable, descendants = pcall(container.GetDescendants, container)
-        if readable then
-            for _, object in ipairs(descendants) do
-                if not seen[object] and not ownUI(object) and (object:IsA("ScreenGui") or ((state.PickMode == "UI element" or state.PickMode == "UI panel") and object:IsA("GuiObject"))) then
-                    seen[object] = true
-                    if #values >= 1000 then break end
-                    local key = tostring(#values + 1) .. " / " .. object:GetFullName() .. " [" .. object.ClassName .. "]"
-                    values[#values + 1], uiEntries[key] = key, object
-                end
-            end
-        end
+local function collectGameUI()
+    local roots = {}
+    local playerGui = Player:FindFirstChild("PlayerGui")
+    if not playerGui then return roots end
+    for _, object in ipairs(playerGui:GetDescendants()) do
+        if object:IsA("ScreenGui") and not ownUI(object) and object.Name ~= "Cobalt" and object.Name:sub(1, 5) ~= "_DPP_" then roots[#roots + 1] = object end
     end
-    if #values == 0 then values[1] = "No accessible UI found" end
-    uiDropdown:Refresh(values)
-    exportMessage("UI browser refreshed", "Found " .. (#values == 1 and not uiEntries[values[1]] and 0 or #values) .. " entries. Choose an entry, then Add / remove UI selection. Lists up to 1,000 entries.")
+    return roots
 end
 
 local function pickObject(position)
-    if uiMode() then return pickUI(position) end
     if overHub(position) then return nil end
     local camera = workspace.CurrentCamera
     if not camera then return nil end
@@ -514,8 +510,8 @@ local function exportSelection(category)
     if exportBusy then notify("An export is already running."); return end
     refreshSelection()
     local eligible, targets = {}, {}
-    for _, target in ipairs(selected) do
-        if not category or (category == "UI" and isUI(target)) or (category == "Models" and not isUI(target)) then eligible[#eligible + 1] = target end
+    if category == "Game UI" then eligible = collectGameUI() else
+        for _, target in ipairs(selected) do eligible[#eligible + 1] = target end
     end
     for _, target in ipairs(eligible) do
         local covered = false
@@ -524,13 +520,14 @@ local function exportSelection(category)
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 then exportMessage("Nothing to export", "Select " .. (category or "models or UI") .. " targets first."); return end
+    if #targets == 0 then exportMessage("Nothing to export", category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
-    if exportLayout == "Separate files" then
+    if category ~= "Game UI" and exportLayout == "Separate files" then
         for _, target in ipairs(targets) do batches[#batches + 1] = { target } end
     else batches[1] = targets end
-    local filename, wrap = customFilename, wrapFragments
+    local filename = customFilename
+    if category == "Game UI" and filename == "" then filename = "GameUI-" .. game.PlaceId end
     exportBusy, cancelExport = true, false
     exportMessage("Preparing export", #targets .. " root(s), " .. #batches .. " file(s). Loading the exporter...")
     task.spawn(function()
@@ -547,32 +544,14 @@ local function exportSelection(category)
         if loaded then
             for index, batch in ipairs(batches) do
                 if cancelExport or not Session.Alive then break end
-                local temporary, wrote, path, bytes = {}, false, nil, 0
+                local wrote, path, bytes = false, nil, 0
                 local ok, err = pcall(function()
                     local saveTargets, allUI, anyUI = {}, true, false
                     for _, target in ipairs(batch) do
                         assert(target.Parent, "A selected target was removed. Refresh and retry.")
                         local ui = isUI(target)
                         allUI, anyUI = allUI and ui, anyUI or ui
-                        if wrap and target:IsA("GuiObject") then
-                            local clone = target:Clone()
-                            assert(clone, target.Name .. " cannot be cloned. Disable Wrap UI fragments to export it directly.")
-                            temporary[#temporary + 1] = clone
-                            local screen = Instance.new("ScreenGui")
-                            temporary[#temporary + 1] = screen
-                            screen.Name, screen.ResetOnSpawn, screen.Enabled = target.Name .. "_UI", false, true
-                            local originalScreen = target:FindFirstAncestorOfClass("ScreenGui")
-                            screen.IgnoreGuiInset = originalScreen and originalScreen.IgnoreGuiInset or false
-                            clone.Parent, clone.Visible = screen, true
-                            clone.AnchorPoint, clone.Position = Vector2.new(0, 0), UDim2.fromOffset(24, 24)
-                            if target.AbsoluteSize and target.AbsoluteSize.X > 0 and target.AbsoluteSize.Y > 0 then
-                                clone.Size = UDim2.fromOffset(target.AbsoluteSize.X, target.AbsoluteSize.Y)
-                            end
-                            for _, child in ipairs(clone:GetDescendants()) do
-                                if child:IsA("Script") or child:IsA("LocalScript") or child:IsA("ModuleScript") then child:Destroy() end
-                            end
-                            saveTargets[#saveTargets + 1] = screen
-                        else saveTargets[#saveTargets + 1] = target end
+                        saveTargets[#saveTargets + 1] = target
                     end
                     local group = allUI and "UI" or (anyUI and "Mixed" or "Models")
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
@@ -613,7 +592,6 @@ local function exportSelection(category)
                     })
                     assert(wrote or cancelExport or not Session.Alive, "Exporter produced no file. It may be busy or unsupported.")
                 end)
-                for i = #temporary, 1, -1 do temporary[i]:Destroy() end
                 if wrote and ok then
                     successes, lastExportPath = successes + 1, path
                     exportHistory[#exportHistory + 1] = { Path = path, Bytes = bytes, Roots = #batch, Time = os.date("%H:%M:%S") }
@@ -712,7 +690,8 @@ local function build()
     })
     characterStatus = settings:Paragraph({ Title = "Character", Desc = "Waiting for your character..." })
     if logo == "" then home:Paragraph({ Title = "PW / Paraware", Desc = logoStatus }) end
-    home:Button({ Title = "Launch Cobalt", Desc = "Open Cobalt in its own window.", Icon = "code", Callback = launchCobalt })
+    home:Button({ Title = "Launch Cobalt", Desc = "Launch again after closing ×, or reveal a minimized Cobalt window.", Icon = "code", Callback = launchCobalt })
+    home:Button({ Title = "Launch Dex++", Desc = "Open the DexPlusPlus Stable 3.0 instance explorer.", Icon = "folder-search", Callback = launchDex })
 
     local function toggle(tab, key, title, desc, callback)
         toggles[key] = tab:Toggle({ Title = title, Desc = desc, Value = false, Callback = callback })
@@ -785,15 +764,15 @@ local function build()
         log("Fullbright " .. tostring(value))
     end)
 
-    assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models, parts, or UI objects. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
+    assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models or parts. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
     toggle(assets, "Picker", "Object picker", "Click to add or remove a target. Selecting does not save a file.", function(value)
         state.Picker = value
         if not value and pickerHighlight then pickerHighlight.Adornee = nil end
         exportMessage(value and "Picker ready" or "Picker off", value and "Click targets outside the hub, then Export selected." or "Selection is kept. You can still export or clear it.")
         log("Object picker " .. tostring(value))
     end)
-    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part", "Whole ScreenGui", "UI panel", "UI element" }, Value = state.PickMode,
-        Callback = function(value) state.PickMode = value; if uiMode() then refreshUIBrowser() end end })
+    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part" }, Value = state.PickMode,
+        Callback = function(value) state.PickMode = value end })
     selectionSummary = assets:Paragraph({ Title = "Selected: 0", Desc = "Nothing selected. Click a target to add it; click it again to remove it." })
     selectedDropdown = assets:Dropdown({ Title = "Selected targets", Values = { "Nothing selected" }, Value = "Nothing selected", SearchBarEnabled = true, Callback = function(value)
         selectionChoice = selectedEntries and selectedEntries[value]
@@ -801,7 +780,6 @@ local function build()
             local target = selectionChoice
             local size = target:IsA("GuiObject") and target.AbsoluteSize
             selectedDetails:SetDesc(target:GetFullName() .. "\nClass: " .. target.ClassName .. (size and ("\nSize: " .. math.floor(size.X) .. " × " .. math.floor(size.Y) .. " px") or "") .. "\nIncludes loaded descendants. Scripts are excluded.")
-            if isUI(target) then lastPickedUI = target end
         end
     end })
     selectedDetails = assets:Paragraph({ Title = "Target details", Desc = "Choose a selected target to inspect or remove it." })
@@ -826,7 +804,6 @@ local function build()
         local copied = pcall(setclipboard, lastExportPath)
         notify(copied and "Export path copied." or "Could not copy the export path.")
     end })
-    local browser = assets:Section({ Title = "UI browser", Icon = "panels-top-left", Opened = false, Box = true })
     local models = assets:Section({ Title = "Model export", Icon = "box", Opened = false, Box = true })
     models:Button({ Title = "Pick models", Callback = function()
         state.Picker, state.PickMode = true, "Nearest model"
@@ -835,31 +812,10 @@ local function build()
         exportMessage("Model picker ready", "Click models to add/remove them. Export models only saves the model/part targets in your selection.")
     end })
     models:Button({ Title = "Export models only", Callback = function() exportSelection("Models") end })
-    browser:Button({ Title = "Export UI only", Callback = function() exportSelection("UI") end })
-    browser:Toggle({ Title = "Wrap UI fragments", Value = wrapFragments, Desc = "Clone panels/elements into standalone ScreenGuis. Uses their current pixel size and places each fragment at 24,24. Whole ScreenGuis stay unchanged. Turn off to preserve the original hierarchy properties.", Callback = function(value) wrapFragments = value end })
-    browser:Button({ Title = "Pick UI on screen", Desc = "Enable panel picking. Point at the Index window, click to select it, then Export selected.", Callback = function()
-        state.PickMode, state.Picker = "UI panel", true
-        selectionMode:Select("UI panel")
-        toggles.Picker:Set(true, false)
-        exportMessage("UI picker ready", "Point at an interface to preview its panel. Click to select; click again to remove. Export selected saves your selection.")
-    end })
-    browser:Button({ Title = "Select parent UI", Desc = "If the selected element is too small, replace it with its parent. Repeat to reach the entire panel or ScreenGui.", Callback = function()
-        local parent = lastPickedUI and lastPickedUI.Parent
-        if not parent or not (parent:IsA("GuiObject") or parent:IsA("ScreenGui")) or ownUI(parent) then notify("Pick a UI element first, or choose a target in the UI browser."); return end
-        for i, target in ipairs(selected) do if target == lastPickedUI then table.remove(selected, i); break end end
-        local present = false
-        for _, target in ipairs(selected) do if target == parent then present = true; break end end
-        if not present then toggleSelection(parent) else refreshSelection() end
-        lastPickedUI = parent
-    end })
-    browser:Paragraph({ Title = "Export an interface", Desc = "Whole ScreenGui includes the complete interface. UI element includes the chosen element and its children. Hover and press P to select without clicking a game's button. Use the browser for hidden or overlapping UI. Scripts are excluded, so exported UI keeps its design but not its scripted behavior." })
-    uiDropdown = browser:Dropdown({ Title = "UI target", SearchBarEnabled = true, Values = { "Refresh to list UI" }, Value = "Refresh to list UI", Callback = function(value) uiChoice = uiEntries and uiEntries[value] end })
-    browser:Button({ Title = "Refresh UI list", Callback = refreshUIBrowser })
-    browser:Button({ Title = "Add / remove UI selection", Callback = function()
-        if not uiChoice or not uiChoice.Parent then notify("Refresh the UI list and choose a valid entry first."); return end
-        toggleSelection(uiChoice)
-    end })
-    exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Choose a selection mode, then enable the picker or use the UI browser." })
+    local gameUI = assets:Section({ Title = "Whole game UI", Icon = "panels-top-left", Opened = true, Box = true })
+    gameUI:Paragraph({ Title = "One UI file", Desc = "Export every loaded game ScreenGui in PlayerGui, including hidden interfaces and their descendants, into one .rbxm. Excludes Paraware and known Cobalt/Dex++ screens. Scripts are excluded; unopened interfaces that have not been created yet cannot be saved." })
+    gameUI:Button({ Title = "Export whole game UI", Icon = "download", Callback = function() exportSelection("Game UI") end })
+    exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Select models with the picker, or use Export whole game UI." })
     historyStatus = assets:Paragraph({ Title = "Recent exports", Desc = "No files saved this session." })
     assets:Button({ Title = "Copy export history", Callback = function()
         if #exportHistory == 0 then notify("No files saved this session."); return end
@@ -7309,39 +7265,21 @@ if Player.Character then task.spawn(bindCharacter, Player.Character) end
 
 connect(Input.InputBegan, function(input, processed)
     if state.Picker and input.UserInputType == Enum.UserInputType.MouseButton1 then
-        if (processed and not uiMode()) or (Input:GetFocusedTextBox() and not uiMode()) then return end
+        if processed or Input:GetFocusedTextBox() then return end
         local target = pickObject(input.Position)
-        if target then toggleSelection(target) elseif not overHub(input.Position) then exportMessage("No target found", "Choose another target or use the UI browser. Terrain is not supported.") end
+        if target then toggleSelection(target) elseif not overHub(input.Position) then exportMessage("No target found", "Choose a loaded model or part. Terrain is not supported.") end
         return
     end
     if processed or Input:GetFocusedTextBox() then return end
-    if state.Picker and uiMode() and input.KeyCode == Enum.KeyCode.P then
-        local target = pickUI(Input:GetMouseLocation())
-        if target then toggleSelection(target) else exportMessage("No UI target found", "Hover over a game interface or choose a target in the UI browser.") end
-        return
-    end
     if input.KeyCode == Config.FlyKey then
         setFly(not state.Fly)
         toggles.Fly:Set(state.Fly, false)
     end
 end)
 connect(Input.TouchTapInWorld, function(position, processed)
-    if processed or not state.Picker or uiMode() or Input:GetFocusedTextBox() then return end
+    if processed or not state.Picker or Input:GetFocusedTextBox() then return end
     local target = pickObject(position)
     if target then toggleSelection(target) else exportMessage("No target found", "Tap a loaded object. Terrain is not supported.") end
-end)
-local uiTouchStart
-connect(Input.InputBegan, function(input)
-    if input.UserInputType == Enum.UserInputType.Touch and state.Picker and uiMode() then uiTouchStart = input.Position end
-end)
-connect(Input.InputEnded, function(input)
-    if input.UserInputType ~= Enum.UserInputType.Touch then return end
-    local start = uiTouchStart
-    uiTouchStart = nil
-    if start and state.Picker and uiMode() and (input.Position - start).Magnitude < 16 then
-        local target = pickUI(input.Position)
-        if target then toggleSelection(target) end
-    end
 end)
 pickerHighlight = Instance.new("Highlight")
 pickerHighlight.Name = "ParawareObjectPicker"
@@ -7351,57 +7289,10 @@ pickerHighlight.FillTransparency = 0.85
 pickerHighlight.OutlineTransparency = 0.15
 pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 pickerHighlight.Parent = workspace
-uiPreviewGui = Instance.new("ScreenGui")
-uiPreviewGui.Name, uiPreviewGui.ResetOnSpawn = "ParawareUIPreview", false
-uiPreviewGui.IgnoreGuiInset, uiPreviewGui.DisplayOrder = true, 10050
-uiPreviewGui.Parent = Player:WaitForChild("PlayerGui")
-uiPreviewBox = Instance.new("Frame")
-uiPreviewBox.Name, uiPreviewBox.BackgroundTransparency = "TargetOutline", 1
-uiPreviewBox.BorderSizePixel, uiPreviewBox.BorderColor3 = 2, Color3.fromHex("#9BC9FF")
-uiPreviewBox.Active, uiPreviewBox.Visible, uiPreviewBox.Parent = false, false, uiPreviewGui
-uiPreviewLabel = Instance.new("TextLabel")
-uiPreviewLabel.Name, uiPreviewLabel.Size = "TargetName", UDim2.fromOffset(330, 40)
-uiPreviewLabel.BackgroundColor3, uiPreviewLabel.BackgroundTransparency = Color3.fromHex("#111111"), 0.1
-uiPreviewLabel.TextColor3, uiPreviewLabel.Font, uiPreviewLabel.TextSize = Color3.fromHex("#FFFFFF"), Enum.Font.GothamMedium, 12
-uiPreviewLabel.TextWrapped, uiPreviewLabel.Active, uiPreviewLabel.Visible = true, false, false
-uiPreviewLabel.Parent = uiPreviewGui
 connect(RunService.RenderStepped, function()
     if not pickerHighlight then return end
     for _, target in ipairs(selected) do if not target.Parent then refreshSelection(); break end end
-    for target, outline in pairs(selectionHighlights) do
-        if outline:IsA("Frame") then
-            outline.Visible = target.Parent ~= nil and target.Visible ~= false and target.AbsolutePosition ~= nil and target.AbsoluteSize ~= nil
-            local ancestor = target.Parent
-            while outline.Visible and ancestor do
-                if (ancestor:IsA("GuiObject") and ancestor.Visible == false) or (ancestor:IsA("ScreenGui") and ancestor.Enabled == false) then outline.Visible = false end
-                ancestor = ancestor.Parent
-            end
-            if outline.Visible then
-                outline.Position = UDim2.fromOffset(target.AbsolutePosition.X, target.AbsolutePosition.Y)
-                outline.Size = UDim2.fromOffset(target.AbsoluteSize.X, target.AbsoluteSize.Y)
-            end
-        end
-    end
-    uiPreviewBox.Visible, uiPreviewLabel.Visible = false, false
-    hoveredUI = nil
-    if state.Picker and uiMode() and windowFocused and Input.MouseEnabled then
-        local position = Input:GetMouseLocation()
-        hoveredUI = pickUI(position)
-        if hoveredUI then
-            local selectedTarget = false
-            for _, target in ipairs(selected) do if target == hoveredUI then selectedTarget = true; break end end
-            uiPreviewLabel.Text = hoveredUI.Name .. " [" .. hoveredUI.ClassName .. "]\n" .. (selectedTarget and "Click or P to unselect" or "Click or P to select / Export selected to save")
-            local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1440, 900)
-            uiPreviewLabel.Position = UDim2.fromOffset(math.max(0, math.min(position.X + 16, viewport.X - 330)), math.max(0, math.min(position.Y + 24, viewport.Y - 40)))
-            uiPreviewLabel.Visible = true
-            if hoveredUI:IsA("GuiObject") and hoveredUI.AbsolutePosition and hoveredUI.AbsoluteSize then
-                uiPreviewBox.Position = UDim2.fromOffset(hoveredUI.AbsolutePosition.X, hoveredUI.AbsolutePosition.Y)
-                uiPreviewBox.Size = UDim2.fromOffset(hoveredUI.AbsoluteSize.X, hoveredUI.AbsoluteSize.Y)
-                uiPreviewBox.Visible = true
-            end
-        end
-    end
-    if state.Picker and not uiMode() and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
+    if state.Picker and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
         pickerHighlight.Adornee = pickObject(Input:GetMouseLocation())
     else
         pickerHighlight.Adornee = nil
