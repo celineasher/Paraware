@@ -7,11 +7,11 @@ local Config = {
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
     ToggleKey = Enum.KeyCode.RightShift,
     FlyKey = Enum.KeyCode.F,
+    DexUrl = "https://github.com/AZYsGithub/DexPlusPlus/releases/download/stable-3.0/out.lua",
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
 local embeddedLogo
-local createRemoteListener
 
 local GameModules = { Places = {}, Universes = {} }
 -- GameModules.Places[123456789] = { Name = "My game", Build = function(context) ... end }
@@ -59,7 +59,7 @@ local logs, console, characterStatus = {}, nil, nil
 local Window
 local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
-local remoteListener
+local dexBusy, dexLoaded = false, false
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -114,14 +114,30 @@ local function notify(message)
     end
 end
 
-local function launchRemoteListener()
+local function launchDex()
     if not Session.Alive then return end
-    if remoteListener and remoteListener.Alive then remoteListener:Show(); return end
-    local ok, result = pcall(createRemoteListener, { Player = Player, Input = Input, Log = log, Logo = Config.LogoAsset })
-    if not ok then notify("Remote Listener failed to open: " .. tostring(result)); return end
-    remoteListener = result
-    table.insert(cleanups, function() result:Destroy() end)
-    log("Paraware Remote Listener opened.")
+    if dexBusy then notify("DexPlusPlus is loading."); return end
+    if dexLoaded then notify("DexPlusPlus already launched in this session."); return end
+    dexBusy = true
+    task.spawn(function()
+        local ok, result = pcall(function()
+            local source = game:HttpGet(Config.DexUrl)
+            if not Session.Alive then return false end
+            local chunk, compileError = loadstring(source)
+            if type(chunk) ~= "function" then error(compileError or "Invalid DexPlusPlus script") end
+            chunk()
+            return true
+        end)
+        dexBusy = false
+        if not Session.Alive then return end
+        if ok and result then
+            dexLoaded = true
+            notify("DexPlusPlus launch script completed.")
+        else
+            log("DexPlusPlus launch error: " .. tostring(result))
+            notify("DexPlusPlus failed to load. Check Session log, then retry.")
+        end
+    end)
 end
 
 local function restoreCollisions()
@@ -473,7 +489,7 @@ local function build()
     })
     characterStatus = settings:Paragraph({ Title = "Character", Desc = "Waiting for your character..." })
     if logo == "" then home:Paragraph({ Title = "PW / Paraware", Desc = logoStatus }) end
-    home:Button({ Title = "Remote Listener", Desc = "Inspect outgoing remote calls in Paraware's own window.", Icon = "radio", Callback = launchRemoteListener })
+    home:Button({ Title = "Launch DexPlusPlus", Desc = "Open the Stable 3.0 instance explorer in its own window.", Icon = "folder-search", Callback = launchDex })
 
     local function toggle(tab, key, title, desc, callback)
         toggles[key] = tab:Toggle({ Title = title, Desc = desc, Value = false, Callback = callback })
@@ -597,331 +613,6 @@ local function build()
     end)
 end
 
-createRemoteListener = (function()
--- Original Paraware listener. Outgoing namecalls only; no call replay or external loader.
-return function(context)
-    local Tool = { Alive = true, Recording = false, Records = {}, Selected = nil, Filter = "", Follow = true, Dropped = 0 }
-    local Input = context.Input or game:GetService("UserInputService")
-    local env = (getgenv and getgenv()) or _G
-    local connections, rowConnections, queue, queued, sequence = {}, {}, {}, false, 0
-    local gui, window, list, code, status, pause, follow, bridge
-    local refreshPending = false
-    local refresh
-    local function connect(signal, callback)
-        local connection = signal:Connect(callback)
-        connections[#connections + 1] = connection
-        return connection
-    end
-    local function report(message)
-        Tool.Message = message
-        if status then status.Text = message end
-        if context.Log then context.Log(message) end
-    end
-    local function pathOf(instance)
-        if instance == game then return "game" end
-        local names, cursor = {}, instance
-        while cursor and cursor ~= game do
-            names[#names + 1] = cursor.Name
-            cursor = cursor.Parent
-        end
-        if cursor ~= game then return "nil --[[ instance is not parented to game ]]" end
-        local result = "game"
-        for i = #names, 1, -1 do result = result .. ":WaitForChild(" .. string.format("%q", names[i]) .. ")" end
-        return result
-    end
-    local function snapshot(value, seen, budget, depth)
-        if typeof(value) ~= "table" then return value end
-        if seen[value] then return seen[value] end
-        if depth > 5 or budget.Remaining <= 0 then budget.Truncated = true; return "<capture limit>" end
-        local copy = {}
-        seen[value] = copy
-        for key, item in next, value do
-            if budget.Remaining <= 0 then budget.Truncated = true; break end
-            budget.Remaining = budget.Remaining - 1
-            copy[snapshot(key, seen, budget, depth + 1)] = snapshot(item, seen, budget, depth + 1)
-        end
-        return copy
-    end
-    local function number(value)
-        if value ~= value then return "(0/0)" end
-        if value == math.huge then return "math.huge" end
-        if value == -math.huge then return "-math.huge" end
-        return tostring(value)
-    end
-    local serialize
-    serialize = function(value, seen, depth, flags)
-        local kind = typeof(value)
-        if kind == "nil" then return "nil" end
-        if kind == "string" then return string.format("%q", value) end
-        if kind == "boolean" then return tostring(value) end
-        if kind == "number" then return number(value) end
-        if kind == "Instance" then return pathOf(value) end
-        if kind == "EnumItem" then return tostring(value) end
-        if kind == "Vector3" then return "Vector3.new(" .. number(value.X) .. ", " .. number(value.Y) .. ", " .. number(value.Z) .. ")" end
-        if kind == "Vector2" then return "Vector2.new(" .. number(value.X) .. ", " .. number(value.Y) .. ")" end
-        if kind == "Color3" then return "Color3.new(" .. number(value.R) .. ", " .. number(value.G) .. ", " .. number(value.B) .. ")" end
-        if kind == "CFrame" then
-            local values = { value:GetComponents() }
-            for i, item in ipairs(values) do values[i] = number(item) end
-            return "CFrame.new(" .. table.concat(values, ", ") .. ")"
-        end
-        if kind == "UDim" then return "UDim.new(" .. number(value.Scale) .. ", " .. number(value.Offset) .. ")" end
-        if kind == "UDim2" then return "UDim2.new(" .. number(value.X.Scale) .. ", " .. number(value.X.Offset) .. ", " .. number(value.Y.Scale) .. ", " .. number(value.Y.Offset) .. ")" end
-        if kind == "NumberRange" then return "NumberRange.new(" .. number(value.Min) .. ", " .. number(value.Max) .. ")" end
-        if kind == "BrickColor" then return "BrickColor.new(" .. value.Number .. ")" end
-        if kind == "table" then
-            if seen[value] or depth > 5 then flags.Approximate = true; return "nil --[[ cycle/depth limit ]]" end
-            seen[value] = true
-            local keys, lines = {}, {}
-            for key in next, value do keys[#keys + 1] = key end
-            table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
-            for i, key in ipairs(keys) do
-                if i > 100 then flags.Approximate = true; break end
-                if type(key) == "string" or type(key) == "number" or type(key) == "boolean" then
-                    lines[#lines + 1] = "[" .. serialize(key, seen, depth + 1, flags) .. "] = " .. serialize(value[key], seen, depth + 1, flags) .. ","
-                else
-                    flags.Approximate = true
-                end
-            end
-            seen[value] = nil
-            return "{\n" .. string.rep("    ", depth + 1) .. table.concat(lines, "\n" .. string.rep("    ", depth + 1)) .. "\n" .. string.rep("    ", depth) .. "}"
-        end
-        flags.Approximate = true
-        return "nil --[[ unsupported " .. kind .. " ]]"
-    end
-    function Tool:Format(remote, method, arguments, truncated)
-        local flags, parts = { Approximate = truncated or false }, {}
-        for i = 1, arguments.n do parts[i] = serialize(arguments[i], {}, 0, flags) end
-        local header = "-- Captured outgoing call. Copy only; this listener does not replay calls.\n"
-        if flags.Approximate then header = header .. "-- Approximate: cyclic, unsupported, or limited values were replaced/omitted.\n" end
-        return header .. "local remote = " .. pathOf(remote) .. "\nremote:" .. method .. "(\n    " .. table.concat(parts, ",\n    ") .. "\n)", flags.Approximate
-    end
-    local function scheduleRefresh()
-        if refreshPending then return end
-        refreshPending = true
-        task.delay(0.15, function()
-            refreshPending = false
-            if Tool.Alive and refresh then refresh() end
-        end)
-    end
-    local function drain()
-        queued = false
-        if not Tool.Alive then queue = {}; return end
-        local batch = queue
-        queue = {}
-        for _, item in ipairs(batch) do
-            if Tool.Recording then
-                sequence = sequence + 1
-                local ok, script, approximate = pcall(Tool.Format, Tool, item.Remote, item.Method, item.Arguments, item.Truncated)
-                if not ok then script, approximate = "-- Could not format this call: " .. tostring(script), true end
-                local record = { Id = sequence, Name = item.Remote.Name, Path = pathOf(item.Remote), Method = item.Method,
-                    Count = item.Arguments.n, Script = script, Time = os.date("%H:%M:%S"), Approximate = approximate }
-                Tool.Records[#Tool.Records + 1] = record
-                if #Tool.Records > 200 then table.remove(Tool.Records, 1) end
-                if Tool.Follow then Tool.Selected = record end
-            end
-        end
-        scheduleRefresh()
-    end
-    function Tool:Enqueue(remote, method, ...)
-        if not self.Alive or not self.Recording then return end
-        if #queue >= 64 then self.Dropped = self.Dropped + 1; return end
-        local arguments, seen, budget = table.pack(...), {}, { Remaining = 400, Truncated = false }
-        for i = 1, arguments.n do arguments[i] = snapshot(arguments[i], seen, budget, 0) end
-        queue[#queue + 1] = { Remote = remote, Method = method, Arguments = arguments, Truncated = budget.Truncated }
-        if not queued then queued = true; task.defer(drain) end
-    end
-    function Tool:Start()
-        if not self.Alive then return false end
-        if type(hookmetamethod) ~= "function" or type(getnamecallmethod) ~= "function" then
-            self.Recording = false
-            report("Unavailable: this runtime needs hookmetamethod and getnamecallmethod.")
-            return false
-        end
-        bridge = env.ParawareRemoteBridge
-        if not bridge or not bridge.Installed then
-            bridge = { Subscriber = nil, Installed = false }
-            local activeBridge = bridge
-            local function hook(remote, ...)
-                local method = getnamecallmethod()
-                local subscriber = activeBridge.Subscriber
-                if subscriber and subscriber.Alive and subscriber.Recording then
-                    local class = remote.ClassName
-                    local event = (class == "RemoteEvent" or class == "UnreliableRemoteEvent") and method == "FireServer"
-                    local invoke = class == "RemoteFunction" and method == "InvokeServer"
-                    if event or invoke then pcall(subscriber.Enqueue, subscriber, remote, method, ...) end
-                end
-                return activeBridge.Original(remote, ...)
-            end
-            bridge.Hook = newcclosure and newcclosure(hook) or hook
-            local ok, original = pcall(hookmetamethod, game, "__namecall", bridge.Hook)
-            if not ok or type(original) ~= "function" then
-                self.Recording = false
-                report("Could not install remote listener: " .. tostring(original))
-                return false
-            end
-            bridge.Original, bridge.Installed = original, true
-            env.ParawareRemoteBridge = bridge
-        end
-        bridge.Subscriber = self
-        self.Recording = true
-        report("Recording outgoing remote namecalls.")
-        scheduleRefresh()
-        return true
-    end
-    function Tool:Pause()
-        self.Recording = false
-        queue = {}
-        report("Paused. Captured calls remain available.")
-        scheduleRefresh()
-    end
-    function Tool:Clear()
-        queue, self.Records, self.Selected, self.Dropped = {}, {}, nil, 0
-        if code then code.Text = "-- No calls yet. Start recording, then interact with the game." end
-        scheduleRefresh()
-    end
-    function Tool:SetFilter(value)
-        self.Filter = tostring(value):lower()
-        scheduleRefresh()
-    end
-    function Tool:Copy(pathOnly)
-        if not self.Selected then report("Select a captured call first."); return false end
-        if not setclipboard then report("Clipboard is unavailable in this runtime."); return false end
-        local ok = pcall(setclipboard, pathOnly and self.Selected.Path or self.Selected.Script)
-        report(ok and (pathOnly and "Remote path copied." or "Captured call copied.") or "Clipboard copy failed.")
-        return ok
-    end
-    function Tool:Destroy()
-        if not self.Alive then return end
-        self.Alive, self.Recording = false, false
-        for _, connection in ipairs(connections) do connection:Disconnect() end
-        for _, connection in ipairs(rowConnections) do connection:Disconnect() end
-        if bridge and bridge.Subscriber == self then
-            bridge.Subscriber = nil
-            -- Restore only our own topmost hook; never overwrite another tool's newer hook.
-            if getrawmetatable then
-                local ok, metatable = pcall(getrawmetatable, game)
-                if ok and metatable.__namecall == bridge.Hook then
-                    local restored = pcall(hookmetamethod, game, "__namecall", bridge.Original)
-                    if restored then bridge.Installed = false; env.ParawareRemoteBridge = nil end
-                end
-            end
-        end
-        queue, self.Records, self.Selected = {}, {}, nil
-        if gui then gui:Destroy() end
-    end
-    function Tool:Show()
-        if window then window.Visible = true end
-    end
-    if not context.Headless then
-        local function node(class, properties, parent)
-            local object = Instance.new(class)
-            for key, value in pairs(properties) do object[key] = value end
-            object.Parent = parent
-            return object
-        end
-        local function rounded(object, radius)
-            node("UICorner", { CornerRadius = UDim.new(0, radius) }, object)
-        end
-        gui = node("ScreenGui", { Name = "ParawareRemoteListener", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 10020, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, context.Player:WaitForChild("PlayerGui"))
-        local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
-        local width = viewport and math.max(280, math.min(900, viewport.X - 24)) or 900
-        local height = viewport and math.max(360, math.min(620, viewport.Y - 56)) or 620
-        local compact = width < 650
-        window = node("Frame", { Name = "Window", Size = UDim2.fromOffset(width, height), Position = UDim2.new(0.5, 0, 0.5, 0), AnchorPoint = Vector2.new(0.5, 0.5), BackgroundColor3 = Color3.fromHex("#111111"), Active = true }, gui)
-        rounded(window, 18)
-        node("UIStroke", { Color = Color3.fromHex("#FFFFFF"), Transparency = 0.8, Thickness = 1 }, window)
-        local top = node("Frame", { Size = UDim2.new(1, 0, 0, 48), BackgroundTransparency = 1, Active = true }, window)
-        if context.Logo and context.Logo ~= "" then
-            node("ImageLabel", { Image = context.Logo, Size = UDim2.fromOffset(30, 30), Position = UDim2.fromOffset(14, 9), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit }, top)
-        end
-        local function label(text, size, position, parent)
-            return node("TextLabel", { Text = text, Size = size, Position = position, TextColor3 = Color3.fromHex("#F5F5F5"), Font = Enum.Font.GothamMedium, TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left, BackgroundTransparency = 1 }, parent)
-        end
-        label("Paraware / Remote Listener", UDim2.new(1, -120, 1, 0), UDim2.fromOffset(52, 0), top).TextTruncate = Enum.TextTruncate.AtEnd
-        local function button(text, parent, callback)
-            local object = node("TextButton", { Text = text, TextSize = 13, Font = Enum.Font.GothamMedium, TextColor3 = Color3.fromHex("#F5F5F5"), BackgroundColor3 = Color3.fromHex("#292929"), AutoButtonColor = true }, parent)
-            rounded(object, 8)
-            connect(object.MouseButton1Click, callback)
-            return object
-        end
-        local minimize = button("-", top, function() window.Visible = false; Tool:Pause() end)
-        minimize.Size, minimize.Position = UDim2.fromOffset(28, 28), UDim2.new(1, -76, 0, 10)
-        local close = button("×", top, function() Tool:Destroy() end)
-        close.Size, close.Position = UDim2.fromOffset(28, 28), UDim2.new(1, -42, 0, 10)
-        local filter = node("TextBox", { PlaceholderText = "Filter remote name, path, or method...", Text = "", ClearTextOnFocus = false, TextSize = 13, Font = Enum.Font.Gotham, TextColor3 = Color3.fromHex("#F5F5F5"), PlaceholderColor3 = Color3.fromHex("#BDBDBD"), TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, -24, 0, 34), Position = UDim2.fromOffset(12, 54), BackgroundColor3 = Color3.fromHex("#222222") }, window)
-        rounded(filter, 8)
-        node("UIPadding", { PaddingLeft = UDim.new(0, 10) }, filter)
-        connect(filter:GetPropertyChangedSignal("Text"), function() Tool:SetFilter(filter.Text) end)
-        local toolbar = node("Frame", { Size = UDim2.new(1, -24, 0, compact and 76 or 34), Position = UDim2.fromOffset(12, 98), BackgroundTransparency = 1 }, window)
-        node("UIGridLayout", { CellSize = UDim2.new(compact and 0.5 or 0.25, -6, 0, 32), CellPadding = UDim2.fromOffset(8, 8), FillDirectionMaxCells = compact and 2 or 4, SortOrder = Enum.SortOrder.LayoutOrder }, toolbar)
-        pause = button("Pause", toolbar, function() if Tool.Recording then Tool:Pause() else Tool:Start() end end)
-        button("Clear", toolbar, function() Tool:Clear() end)
-        button("Copy call", toolbar, function() Tool:Copy(false) end)
-        button("Copy path", toolbar, function() Tool:Copy(true) end)
-        local bodyY = compact and 186 or 144
-        local listHeight = math.min(126, math.floor(height * 0.22))
-        local panelY = bodyY + listHeight + 12
-        list = node("ScrollingFrame", { Name = "Calls", Size = compact and UDim2.new(1, -24, 0, listHeight) or UDim2.new(0, 256, 1, -180), Position = UDim2.fromOffset(12, bodyY), CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollBarThickness = 4, BackgroundColor3 = Color3.fromHex("#191919"), BorderSizePixel = 0 }, window)
-        rounded(list, 10)
-        node("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, list)
-        node("UIPadding", { PaddingTop = UDim.new(0, 6), PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6) }, list)
-        local panel = node("ScrollingFrame", { Size = compact and UDim2.new(1, -24, 1, -(panelY + 36)) or UDim2.new(1, -292, 1, -180), Position = compact and UDim2.fromOffset(12, panelY) or UDim2.fromOffset(280, bodyY), CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.XY, ScrollBarThickness = 4, BackgroundColor3 = Color3.fromHex("#0A0A0A"), BorderSizePixel = 0 }, window)
-        rounded(panel, 10)
-        code = node("TextBox", { Name = "CapturedCall", Text = "-- No calls yet. Start recording, then interact with the game.", TextEditable = false, ClearTextOnFocus = false, MultiLine = true, TextWrapped = false, RichText = false, Font = Enum.Font.Code, TextSize = 13, TextColor3 = Color3.fromHex("#EAEAEA"), TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, Position = UDim2.fromOffset(12, 10), Size = UDim2.new(1, -24, 1, -20), AutomaticSize = Enum.AutomaticSize.XY, BackgroundTransparency = 1 }, panel)
-        status = label("Ready", UDim2.new(1, -136, 0, 22), UDim2.new(0, 14, 1, -28), window)
-        status.TextSize, status.TextTruncate = 12, Enum.TextTruncate.AtEnd
-        follow = button("Follow: on", window, function() Tool.Follow = not Tool.Follow; scheduleRefresh() end)
-        follow.Size, follow.Position = UDim2.fromOffset(108, 24), UDim2.new(1, -122, 1, -30)
-        refresh = function()
-            for _, connection in ipairs(rowConnections) do connection:Disconnect() end
-            rowConnections = {}
-            for _, child in ipairs(list:GetChildren()) do if child:IsA("TextButton") or child:IsA("TextLabel") then child:Destroy() end end
-            local shown = 0
-            for i = #Tool.Records, 1, -1 do
-                local record = Tool.Records[i]
-                local searchable = (record.Name .. " " .. record.Path .. " " .. record.Method):lower()
-                if Tool.Filter == "" or searchable:find(Tool.Filter, 1, true) then
-                    shown = shown + 1
-                    local row = node("TextButton", { Text = record.Time .. "  " .. record.Name .. "\n" .. record.Method .. "  /  " .. record.Count .. " args", TextColor3 = Color3.fromHex("#F5F5F5"), TextSize = 12, Font = Enum.Font.Gotham, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, BackgroundColor3 = Color3.fromHex(Tool.Selected == record and "#393939" or "#242424"), Size = UDim2.new(1, -4, 0, 46), LayoutOrder = shown }, list)
-                    rounded(row, 6)
-                    node("UIPadding", { PaddingLeft = UDim.new(0, 8) }, row)
-                    rowConnections[#rowConnections + 1] = row.MouseButton1Click:Connect(function() Tool.Selected = record; Tool.Follow = false; scheduleRefresh() end)
-                end
-            end
-            if shown == 0 then
-                label(#Tool.Records == 0 and "No calls captured yet." or "No calls match this filter.", UDim2.new(1, -4, 0, 44), UDim2.new(), list).TextSize = 12
-            end
-            code.Text = Tool.Selected and Tool.Selected.Script or "-- No call selected. Start recording, then select a call."
-            pause.Text = Tool.Recording and "Pause" or "Start"
-            follow.Text = Tool.Follow and "Follow: on" or "Follow: off"
-            status.Text = Tool.Recording and ("Recording / " .. #Tool.Records .. " calls / " .. Tool.Dropped .. " dropped") or (Tool.Message or "Paused")
-        end
-        connect(gui.Destroying, function()
-            for _, connection in ipairs(rowConnections) do connection:Disconnect() end
-        end)
-        local dragging, dragStart, startPosition
-        connect(top.InputBegan, function(input)
-            if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
-                dragging, dragStart, startPosition = input, input.Position, window.Position
-            end
-        end)
-        connect(Input.InputChanged, function(input)
-            if not dragging then return end
-            if input == dragging or input.UserInputType == Enum.UserInputType.MouseMovement then
-                local delta = input.Position - dragStart
-                window.Position = UDim2.new(startPosition.X.Scale, startPosition.X.Offset + delta.X, startPosition.Y.Scale, startPosition.Y.Offset + delta.Y)
-            end
-        end)
-        connect(Input.InputEnded, function(input)
-            if input == dragging or input.UserInputType == Enum.UserInputType.MouseButton1 then dragging = nil end
-        end)
-    end
-    Tool:Start()
-    return Tool
-end
-
-end)()
 embeddedLogo = [[
 iVBORw0KGgoAAAANSUhEUgAABOYAAATmCAYAAACF/K4qAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAAB
 AAEAAKACAAQAAAABAAAE5qADAAQAAAABAAAE5gAAAAAaFPOMAABAAElEQVR4AezdW4xl2XkY5rpXV3dP91w45PBmMyIl2kOaBGVbYYTIHkUSEiuWBMUhX6RI
