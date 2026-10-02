@@ -68,6 +68,11 @@ local exportLayout, customFilename, cancelExport = "Together", "", false
 local exportHistory = {}
 local clearSelection, refreshSelection
 local cobaltBusy, dexBusy = false, false
+local soundDropdown, soundStatus, soundTimeline, soundSeek, soundChoice, soundPreview
+local soundEntries, soundConnections = {}, {}
+local soundPlayRequested, soundPaused, soundScanBusy, audioDownloadBusy = false, false, false, false
+local soundVolume, soundAutoPercent, soundUpdateClock = 0.5, 0, 0
+local destroySoundPreview
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -341,6 +346,7 @@ end
 local function cleanup()
     if not Session.Alive then return end
     Session.Alive = false
+    if destroySoundPreview then destroySoundPreview() end
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if pickerHighlight then pickerHighlight:Destroy(); pickerHighlight = nil end
     if clearSelection then clearSelection() end
@@ -510,7 +516,9 @@ local function exportSelection(category)
     if exportBusy then notify("An export is already running."); return end
     refreshSelection()
     local eligible, targets = {}, {}
-    if category == "Game UI" then eligible = collectGameUI() else
+    if category == "Game UI" then eligible = collectGameUI()
+    elseif category == "Sound" then if soundChoice and soundChoice.Object.Parent then eligible = { soundChoice.Object } end
+    else
         for _, target in ipairs(selected) do eligible[#eligible + 1] = target end
     end
     for _, target in ipairs(eligible) do
@@ -520,7 +528,7 @@ local function exportSelection(category)
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 then exportMessage("Nothing to export", category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
+    if #targets == 0 then exportMessage("Nothing to export", category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
     if category ~= "Game UI" and exportLayout == "Separate files" then
@@ -553,7 +561,7 @@ local function exportSelection(category)
                         allUI, anyUI = allUI and ui, anyUI or ui
                         saveTargets[#saveTargets + 1] = target
                     end
-                    local group = allUI and "UI" or (anyUI and "Mixed" or "Models")
+                    local group = category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
                     if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
                     local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
@@ -616,6 +624,176 @@ local function exportSelection(category)
             exportMessage("Model saved", successes .. " file(s) saved\n" .. lastExportPath .. "\nOpen .rbxm files in Roblox Studio. UI belongs in StarterGui or PlayerGui.")
             notify("Saved " .. successes .. " export file(s).")
         end
+    end)
+end
+
+local function soundMessage(title, detail)
+    if soundStatus and Session.Alive then soundStatus:SetTitle(title); soundStatus:SetDesc(detail) end
+end
+
+destroySoundPreview = function()
+    for _, connection in ipairs(soundConnections) do connection:Disconnect() end
+    soundConnections = {}
+    if soundPreview then soundPreview:Stop(); soundPreview:Destroy(); soundPreview = nil end
+    soundPlayRequested, soundPaused = false, false
+end
+
+local function soundTime(seconds)
+    seconds = math.max(0, math.floor(seconds or 0))
+    return string.format("%02d:%02d", math.floor(seconds / 60), seconds % 60)
+end
+
+local function updateSoundTimeline()
+    if not soundTimeline then return end
+    local position = soundPreview and soundPreview.TimePosition or 0
+    local duration = soundPreview and soundPreview.TimeLength or 0
+    local stateText = soundPreview and (soundPreview.IsPlaying and "Playing" or (soundPaused and "Paused" or "Stopped")) or "No preview"
+    soundTimeline:SetDesc(soundTime(position) .. " / " .. soundTime(duration) .. "  •  " .. stateText)
+    soundAutoPercent = duration > 0 and math.floor(math.clamp(position / duration * 100, 0, 100) * 10 + 0.5) / 10 or 0
+    if soundSeek then soundSeek:Set(soundAutoPercent) end
+end
+
+local function chooseSound(entry)
+    destroySoundPreview()
+    soundChoice = entry
+    if not entry then soundMessage("Choose a sound", "Rescan, then select an audio entry."); updateSoundTimeline(); return end
+    soundMessage(entry.Name, "Asset: " .. (entry.Id or entry.Content) .. "\n" .. entry.Path .. "\nPlay creates a separate local preview; the game's sound is unchanged.")
+    updateSoundTimeline()
+end
+
+local function scanSounds()
+    if soundScanBusy then return end
+    soundScanBusy = true
+    soundMessage("Scanning sounds", "Reading currently loaded client objects...")
+    task.spawn(function()
+        local previous = soundChoice and soundChoice.Object
+        local ok, objects = pcall(game.GetDescendants, game)
+        local entries, values, unique, empty, preserved = {}, {}, {}, 0, nil
+        if ok then
+            for _, object in ipairs(objects) do
+                if object ~= soundPreview and (object:IsA("Sound") or object:IsA("AudioPlayer")) then
+                    local readable, content = pcall(function() return object:IsA("Sound") and object.SoundId or object.Asset end)
+                    if readable and type(content) == "string" and content ~= "" then
+                        if #values >= 2000 then break end
+                        local id = content:match("^rbxassetid://(%d+)$") or content:match("[?&]id=(%d+)") or content:match("^(%d+)$")
+                        local entry = { Object = object, Name = object.Name, Path = object:GetFullName(), Content = content, Id = id }
+                        local key = (#values + 1) .. " / " .. entry.Name .. " [" .. (id or object.ClassName) .. "] / " .. entry.Path
+                        values[#values + 1], entries[key] = key, entry
+                        unique[id or content] = true
+                        if object == previous then preserved = entry end
+                    else empty = empty + 1 end
+                end
+            end
+        end
+        soundScanBusy = false
+        if not Session.Alive then return end
+        soundEntries = entries
+        if not preserved then chooseSound(nil)
+        elseif soundChoice.Content ~= preserved.Content then chooseSound(preserved)
+        else soundChoice = preserved end
+        soundDropdown:Refresh(#values > 0 and values or { "No loaded sounds found" })
+        local uniqueCount = 0; for _ in pairs(unique) do uniqueCount = uniqueCount + 1 end
+        soundMessage(ok and "Scan complete" or "Scan failed", ok and (#values .. " audio objects / " .. uniqueCount .. " unique assets\n" .. empty .. " empty/unreadable entries skipped. Lists up to 2,000 entries. Select an entry to preview or download.") or tostring(objects))
+    end)
+end
+
+local function playSoundPreview()
+    if not soundChoice then soundMessage("Choose a sound", "Use Rescan sounds, then select an entry."); return end
+    if soundPreview then
+        soundPaused, soundPlayRequested = false, true
+        if soundPreview.IsLoaded then soundPreview:Resume() else soundMessage("Loading audio", "Waiting for the selected asset to load...") end
+        updateSoundTimeline()
+        return
+    end
+    local ok, err = pcall(function()
+        local preview = Instance.new("Sound")
+        soundPreview = preview
+        preview.Name, preview.SoundId = "ParawareSoundPreview", soundChoice.Content
+        preview.Volume, preview.Looped, preview.PlaybackSpeed = soundVolume, false, 1
+        soundPlayRequested = true
+        soundConnections[#soundConnections + 1] = preview.Loaded:Connect(function()
+            if Session.Alive and soundPreview == preview and soundPlayRequested then preview:Play(); soundMessage("Audio ready", "Drag Seek to jump, or enter an exact timestamp in seconds.") end
+        end)
+        soundConnections[#soundConnections + 1] = preview.Ended:Connect(function()
+            if Session.Alive and soundPreview == preview then soundPlayRequested, soundPaused = false, false; updateSoundTimeline() end
+        end)
+        preview.Parent = game:GetService("SoundService")
+        if preview.IsLoaded then preview:Play(); soundMessage("Audio ready", "Drag Seek to jump, or enter an exact timestamp in seconds.")
+        else soundMessage("Loading audio", "Waiting for the selected asset to load...") end
+        task.delay(12, function()
+            if Session.Alive and soundPreview == preview and not preview.IsLoaded then
+                soundMessage("Audio unavailable", "The asset did not load. It may be restricted, removed, or unavailable to this experience. You can still export its instance/ID.")
+            end
+        end)
+    end)
+    if not ok then destroySoundPreview(); soundMessage("Preview failed", tostring(err)) end
+    updateSoundTimeline()
+end
+
+local function seekSound(seconds)
+    if not soundPreview or not soundPreview.IsLoaded or soundPreview.TimeLength <= 0 then soundMessage("Audio not ready", "Play a sound and wait for it to load before seeking."); return end
+    soundPreview.TimePosition = math.clamp(seconds, 0, soundPreview.TimeLength)
+    updateSoundTimeline()
+end
+
+local function downloadSound()
+    if audioDownloadBusy then notify("An audio download is already running."); return end
+    if not soundChoice or not soundChoice.Id then soundMessage("Download unavailable", "Choose a sound with a numeric Roblox asset ID. Other content formats can be exported as .rbxm."); return end
+    if not writefile then soundMessage("Download unavailable", "Your runtime needs writefile to save audio."); return end
+    local entry = soundChoice
+    audioDownloadBusy = true
+    soundMessage("Downloading audio", entry.Name .. " / " .. entry.Id)
+    task.spawn(function()
+        local path, bytes
+        local ok, err = pcall(function()
+            local url = "https://assetdelivery.roblox.com/v1/asset/?id=" .. entry.Id
+            local requestFunction = request or http_request or (syn and syn.request)
+            local data
+            if requestFunction then
+                local response = requestFunction({ Url = url, Method = "GET" })
+                assert(response and response.StatusCode and response.StatusCode >= 200 and response.StatusCode < 300, "Audio request denied or failed. Asset permissions may prevent downloading.")
+                data = response.Body
+            else data = game:HttpGet(url) end
+            assert(type(data) == "string" and #data >= 12, "Audio response was empty or invalid")
+            assert(#data <= 64 * 1024 * 1024, "Audio exceeds the 64 MB download limit")
+            local extension
+            if data:sub(1, 4) == "OggS" then extension = ".ogg"
+            elseif data:sub(1, 4) == "fLaC" then extension = ".flac"
+            elseif data:sub(1, 4) == "RIFF" and data:sub(9, 12) == "WAVE" then extension = ".wav"
+            elseif data:sub(1, 3) == "ID3" then extension = ".mp3"
+            elseif data:byte(1) == 255 and (data:byte(2) == 241 or data:byte(2) == 249) then extension = ".aac"
+            elseif data:byte(1) == 255 and math.floor(data:byte(2) / 32) == 7 and math.floor(data:byte(2) / 8) % 4 ~= 1 then
+                local layer = math.floor(data:byte(2) / 2) % 4
+                extension = layer == 1 and ".mp3" or (layer == 2 and ".mp2" or (layer == 3 and ".mp1" or nil))
+            end
+            assert(extension, "The response was not recognized audio. It may be a permission error; no file was saved.")
+            if not Session.Alive then return end
+            local prefix = "Paraware-Sounds-"
+            if makefolder then
+                local made = pcall(function()
+                    for _, folder in ipairs({ "Paraware-Exports", "Paraware-Exports/Sounds" }) do if not isfolder or not isfolder(folder) then makefolder(folder) end end
+                end)
+                if made then prefix = "Paraware-Exports/Sounds/" end
+            end
+            local name = entry.Name:gsub("[^%w_-]", "_"):sub(1, 48)
+            if name == "" then name = "Sound" end
+            repeat
+                exportCounter = exportCounter + 1
+                path = prefix .. name .. "-" .. entry.Id .. "-" .. os.date("%Y%m%d-%H%M%S") .. "-" .. exportCounter .. extension
+            until not isfile or not isfile(path)
+            writefile(path, data)
+            if isfile then assert(isfile(path), "Runtime did not create the audio file") end
+            if readfile then assert(readfile(path) == data, "Audio file failed byte-for-byte verification") end
+            bytes = #data
+            lastExportPath = path
+            exportHistory[#exportHistory + 1] = { Path = path, Bytes = bytes, Roots = 1, Time = os.date("%H:%M:%S") }
+            if #exportHistory > 10 then table.remove(exportHistory, 1) end
+            updateHistory()
+        end)
+        audioDownloadBusy = false
+        if not Session.Alive then return end
+        soundMessage(ok and "Audio saved" or "Audio download failed", ok and (path .. "\n" .. string.format("%.1f KB", bytes / 1024)) or tostring(err))
+        if ok then log("Saved audio " .. path) end
     end)
 end
 
@@ -815,6 +993,51 @@ local function build()
     local gameUI = assets:Section({ Title = "Whole game UI", Icon = "panels-top-left", Opened = true, Box = true })
     gameUI:Paragraph({ Title = "One UI file", Desc = "Export every loaded game ScreenGui in PlayerGui, including hidden interfaces and their descendants, into one .rbxm. Excludes Paraware and known Cobalt/Dex++ screens. Scripts are excluded; unopened interfaces that have not been created yet cannot be saved." })
     gameUI:Button({ Title = "Export whole game UI", Icon = "download", Callback = function() exportSelection("Game UI") end })
+    local audio = assets:Section({ Title = "Sound export", Icon = "volume-2", Opened = false, Box = true })
+    audio:Paragraph({ Title = "Find and preview audio", Desc = "Rescan finds loaded Sound and AudioPlayer objects. Select a sound, play it, and seek with the bar or an exact timestamp. Preview is local. Audio downloads depend on asset permissions; .rbxm exports store the audio object and its asset reference." })
+    audio:Button({ Title = "Rescan sounds", Icon = "refresh-cw", Callback = scanSounds })
+    soundDropdown = audio:Dropdown({ Title = "Sound", SearchBarEnabled = true, Values = { "Rescan to find sounds" }, Value = "Rescan to find sounds", Callback = function(value) chooseSound(soundEntries[value]) end })
+    soundStatus = audio:Paragraph({ Title = "Choose a sound", Desc = "Rescan, then select an audio entry." })
+    soundTimeline = audio:Paragraph({ Title = "Playback", Desc = "00:00 / 00:00 • No preview" })
+    soundSeek = audio:Slider({ Title = "Seek", Desc = "Drag to a position in the sound (%)", Step = 0.1, Value = { Min = 0, Max = 100, Default = 0 }, Callback = function(value)
+        value = tonumber(value)
+        if not value or math.abs(value - soundAutoPercent) < 0.0001 then return end
+        seekSound(soundPreview and soundPreview.TimeLength * value / 100 or 0)
+    end })
+    audio:Input({ Title = "Jump to timestamp", Placeholder = "1:23 or 83 seconds", Value = "", Callback = function(value)
+        if value == "" then return end
+        local seconds = tonumber(value)
+        if not seconds then
+            local minutes, remainder = tostring(value):match("^(%d+):(%d%d)$")
+            if minutes and tonumber(remainder) < 60 then seconds = tonumber(minutes) * 60 + tonumber(remainder) end
+        end
+        if not seconds or seconds < 0 then soundMessage("Invalid timestamp", "Enter seconds or minutes:seconds, for example 83 or 1:23."); return end
+        seekSound(seconds)
+    end })
+    audio:Button({ Title = "Play / resume", Icon = "play", Callback = playSoundPreview })
+    audio:Button({ Title = "Pause", Icon = "pause", Callback = function()
+        if not soundPreview then return end
+        soundPlayRequested, soundPaused = false, true
+        soundPreview:Pause(); updateSoundTimeline()
+    end })
+    audio:Button({ Title = "Stop", Icon = "square", Callback = function()
+        if soundPreview then soundPreview:Stop() end
+        soundPlayRequested, soundPaused = false, false; updateSoundTimeline()
+    end })
+    audio:Button({ Title = "Back 10 seconds", Callback = function() seekSound(soundPreview and soundPreview.TimePosition - 10 or 0) end })
+    audio:Button({ Title = "Forward 10 seconds", Callback = function() seekSound(soundPreview and soundPreview.TimePosition + 10 or 0) end })
+    audio:Slider({ Title = "Preview volume", Step = 0.05, Value = { Min = 0, Max = 1, Default = soundVolume }, Callback = function(value)
+        soundVolume = math.clamp(tonumber(value) or 0.5, 0, 1)
+        if soundPreview then soundPreview.Volume = soundVolume end
+    end })
+    audio:Button({ Title = "Download audio", Icon = "download", Callback = downloadSound })
+    audio:Button({ Title = "Export sound as .rbxm", Callback = function() exportSelection("Sound") end })
+    audio:Button({ Title = "Copy sound ID", Icon = "copy", Callback = function()
+        if not soundChoice then notify("Choose a sound first."); return end
+        if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
+        local copied = pcall(setclipboard, soundChoice.Id or soundChoice.Content)
+        notify(copied and "Sound ID copied." or "Could not copy sound ID.")
+    end })
     exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Select models with the picker, or use Export whole game UI." })
     historyStatus = assets:Paragraph({ Title = "Recent exports", Desc = "No files saved this session." })
     assets:Button({ Title = "Copy export history", Callback = function()
@@ -7289,7 +7512,9 @@ pickerHighlight.FillTransparency = 0.85
 pickerHighlight.OutlineTransparency = 0.15
 pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 pickerHighlight.Parent = workspace
-connect(RunService.RenderStepped, function()
+connect(RunService.RenderStepped, function(delta)
+    soundUpdateClock = soundUpdateClock + (delta or 0)
+    if soundUpdateClock >= 0.25 then soundUpdateClock = 0; updateSoundTimeline() end
     if not pickerHighlight then return end
     for _, target in ipairs(selected) do if not target.Parent then refreshSelection(); break end end
     if state.Picker and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
