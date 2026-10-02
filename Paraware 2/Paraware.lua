@@ -7,7 +7,7 @@ local Config = {
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
     ToggleKey = Enum.KeyCode.RightShift,
     FlyKey = Enum.KeyCode.F,
-    DexUrl = "https://github.com/AZYsGithub/DexPlusPlus/releases/download/stable-3.0/out.lua",
+    CobaltUrl = "https://gitlab.com/upio/cobalt/-/releases/permalink/latest/downloads/Cobalt.luau",
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
@@ -63,8 +63,11 @@ local lastExportPath
 local uiPreviewGui, uiPreviewBox, uiPreviewLabel, hoveredUI, lastPickedUI
 local selected, selectionHighlights = {}, {}
 local selectionSummary, uiDropdown, uiEntries, uiChoice
+local selectedDropdown, selectedDetails, selectedEntries, selectionChoice, historyStatus
+local exportLayout, customFilename, wrapFragments, cancelExport = "Together", "", false, false
+local exportHistory = {}
 local clearSelection, refreshSelection
-local dexBusy, dexLoaded = false, false
+local cobaltBusy, cobaltLoaded = false, false
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -119,28 +122,28 @@ local function notify(message)
     end
 end
 
-local function launchDex()
+local function launchCobalt()
     if not Session.Alive then return end
-    if dexBusy then notify("DexPlusPlus is loading."); return end
-    if dexLoaded then notify("DexPlusPlus already launched in this session."); return end
-    dexBusy = true
+    if cobaltBusy then notify("Cobalt is loading."); return end
+    if cobaltLoaded then notify("Cobalt already launched in this session."); return end
+    cobaltBusy = true
     task.spawn(function()
         local ok, result = pcall(function()
-            local source = game:HttpGet(Config.DexUrl)
+            local source = game:HttpGet(Config.CobaltUrl)
             if not Session.Alive then return false end
             local chunk, compileError = loadstring(source)
-            if type(chunk) ~= "function" then error(compileError or "Invalid DexPlusPlus script") end
+            if type(chunk) ~= "function" then error(compileError or "Invalid Cobalt script") end
             chunk()
             return true
         end)
-        dexBusy = false
+        cobaltBusy = false
         if not Session.Alive then return end
         if ok and result then
-            dexLoaded = true
-            notify("DexPlusPlus launch script completed.")
+            cobaltLoaded = true
+            notify("Cobalt launch script completed.")
         else
-            log("DexPlusPlus launch error: " .. tostring(result))
-            notify("DexPlusPlus failed to load. Check Session log, then retry.")
+            log("Cobalt launch error: " .. tostring(result))
+            notify("Cobalt failed to load. Check Session log, then retry.")
         end
     end)
 end
@@ -385,7 +388,8 @@ local function pickUI(position)
 end
 
 refreshSelection = function()
-    local names = {}
+    local names, values = {}, {}
+    selectedEntries = {}
     for i = #selected, 1, -1 do
         local target = selected[i]
         if not target.Parent then
@@ -394,8 +398,14 @@ refreshSelection = function()
         end
     end
     for i, target in ipairs(selected) do
+        local key = i .. " / " .. target:GetFullName() .. " [" .. target.ClassName .. "]"
+        values[#values + 1], selectedEntries[key] = key, target
         if i <= 8 then names[#names + 1] = target.Name .. " (" .. target.ClassName .. ")" end
     end
+    if selectedDropdown then selectedDropdown:Refresh(#values > 0 and values or { "Nothing selected" }) end
+    local present = false
+    for _, target in ipairs(selected) do if target == selectionChoice then present = true; break end end
+    if not present then selectionChoice = nil; if selectedDetails then selectedDetails:SetDesc("Choose a selected target to inspect or remove it.") end end
     if #selected > 8 then names[#names + 1] = "+ " .. (#selected - 8) .. " more" end
     if selectionSummary then
         selectionSummary:SetTitle("Selected: " .. #selected)
@@ -432,6 +442,12 @@ local function toggleSelection(target)
         highlight.FillTransparency, highlight.OutlineTransparency = 0.8, 0.1
         highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.Occluded, workspace
         selectionHighlights[target] = highlight
+    elseif target:IsA("GuiObject") and uiPreviewGui then
+        local outline = Instance.new("Frame")
+        outline.Name, outline.BackgroundTransparency, outline.BorderSizePixel = "SelectedUIOutline", 1, 2
+        outline.BorderColor3, outline.Active, outline.Visible = Color3.fromHex("#9BC9FF"), false, false
+        outline.Parent = uiPreviewGui
+        selectionHighlights[target] = outline
     end
     refreshSelection()
     exportMessage("Added " .. target.Name, "Click again to unselect. Use Export selected when ready.")
@@ -480,80 +496,147 @@ local function pickObject(position)
     return target
 end
 
-local function exportSelection()
+local function isUI(target)
+    return target:IsA("GuiObject") or target:IsA("ScreenGui")
+end
+
+local function updateHistory()
+    if not historyStatus then return end
+    local lines = {}
+    for i = #exportHistory, 1, -1 do
+        local item = exportHistory[i]
+        lines[#lines + 1] = item.Path .. "\n" .. string.format("%.1f KB", item.Bytes / 1024) .. " / " .. item.Roots .. " root(s) / " .. item.Time
+    end
+    historyStatus:SetDesc(#lines > 0 and table.concat(lines, "\n\n") or "No files saved this session.")
+end
+
+local function exportSelection(category)
     if exportBusy then notify("An export is already running."); return end
     refreshSelection()
-    local targets = {}
+    local eligible, targets = {}, {}
     for _, target in ipairs(selected) do
+        if not category or (category == "UI" and isUI(target)) or (category == "Models" and not isUI(target)) then eligible[#eligible + 1] = target end
+    end
+    for _, target in ipairs(eligible) do
         local covered = false
-        for _, ancestor in ipairs(selected) do
+        for _, ancestor in ipairs(eligible) do
             if target ~= ancestor and target:IsDescendantOf(ancestor) then covered = true; break end
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 then exportMessage("Nothing to export", "Select one or more models, parts, or UI elements first."); return end
-    if not writefile then
-        exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files.")
-        notify("Object export requires writefile.")
-        return
-    end
-    exportBusy = true
-    local name = #targets == 1 and targets[1].Name or ("Selection-" .. #targets)
-    exportMessage("Preparing " .. name, "Loading the model exporter. Keep the object loaded.")
+    if #targets == 0 then exportMessage("Nothing to export", "Select " .. (category or "models or UI") .. " targets first."); return end
+    if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
+    local batches = {}
+    if exportLayout == "Separate files" then
+        for _, target in ipairs(targets) do batches[#batches + 1] = { target } end
+    else batches[1] = targets end
+    local filename, wrap = customFilename, wrapFragments
+    exportBusy, cancelExport = true, false
+    exportMessage("Preparing export", #targets .. " root(s), " .. #batches .. " file(s). Loading the exporter...")
     task.spawn(function()
-        local wrote, path = false, nil
-        local ok, err = pcall(function()
+        local successes, failures, errors = 0, 0, {}
+        local loaded, loadError = pcall(function()
             if not exporter then
-                exporter = loadstring(game:HttpGet(Config.ExporterUrl), "ParawareExporter")()
-                assert(type(exporter) == "function", "Exporter did not return a function")
+                local chunk, compileError = loadstring(game:HttpGet(Config.ExporterUrl), "ParawareExporter")
+                assert(type(chunk) == "function", compileError or "Invalid exporter script")
+                local candidate = chunk()
+                assert(type(candidate) == "function", "Exporter did not return a function")
+                exporter = candidate
             end
-            if not Session.Alive then return end
-            for _, target in ipairs(targets) do assert(target.Parent, "A selected target was removed. Refresh your selection and retry.") end
-            local safeName = name:gsub("[^%w_-]", "_"):sub(1, 48)
-            if safeName == "" then safeName = "object" end
-            local prefix = "Paraware-"
-            if makefolder then
-                local made = pcall(function()
-                    if not isfolder or not isfolder("Paraware-Exports") then makefolder("Paraware-Exports") end
-                end)
-                if made then prefix = "Paraware-Exports/" end
-            end
-            repeat
-                exportCounter = exportCounter + 1
-                path = prefix .. safeName .. "-" .. os.date("%Y%m%d-%H%M%S") .. "-" .. exportCounter .. ".rbxm"
-            until not isfile or not isfile(path)
-            exportMessage("Saving " .. name, "Serializing this object and its loaded descendants...")
-            exporter({
-                ExtraInstances = targets, IsModel = true, mode = "selected", Binary = true, CompressionMode = false,
-                Decompile = false, SaveBytecode = false, ReadMe = false,
-                IgnoreList = { "Script", "LocalScript", "ModuleScript" },
-                SafeMode = false, KillAllScripts = false, BoostFPS = false,
-                ShutdownWhenDone = false, AntiIdle = false, ShowStatus = false,
-                SavePlayerCharacters = true, IgnoreDefaultPlayerScripts = false,
-                FilePath = path,
-                Callback = function(data)
-                    if not Session.Alive then return end
-                    assert(type(data) == "string" and data:sub(1, 8) == "<roblox!", "Exporter returned invalid binary model data")
-                    writefile(path, data)
-                    if isfile then assert(isfile(path), "Runtime did not create the output file") end
-                    if readfile then
-                        local saved = readfile(path)
-                        assert(#saved == #data and saved:sub(1, 8) == "<roblox!", "Output file failed verification")
-                    end
-                    wrote = true
-                end,
-            })
-            assert(wrote or not Session.Alive, "Exporter produced no file. It may be busy or unsupported by this runtime.")
         end)
+        if loaded then
+            for index, batch in ipairs(batches) do
+                if cancelExport or not Session.Alive then break end
+                local temporary, wrote, path, bytes = {}, false, nil, 0
+                local ok, err = pcall(function()
+                    local saveTargets, allUI, anyUI = {}, true, false
+                    for _, target in ipairs(batch) do
+                        assert(target.Parent, "A selected target was removed. Refresh and retry.")
+                        local ui = isUI(target)
+                        allUI, anyUI = allUI and ui, anyUI or ui
+                        if wrap and target:IsA("GuiObject") then
+                            local clone = target:Clone()
+                            assert(clone, target.Name .. " cannot be cloned. Disable Wrap UI fragments to export it directly.")
+                            temporary[#temporary + 1] = clone
+                            local screen = Instance.new("ScreenGui")
+                            temporary[#temporary + 1] = screen
+                            screen.Name, screen.ResetOnSpawn, screen.Enabled = target.Name .. "_UI", false, true
+                            local originalScreen = target:FindFirstAncestorOfClass("ScreenGui")
+                            screen.IgnoreGuiInset = originalScreen and originalScreen.IgnoreGuiInset or false
+                            clone.Parent, clone.Visible = screen, true
+                            clone.AnchorPoint, clone.Position = Vector2.new(0, 0), UDim2.fromOffset(24, 24)
+                            if target.AbsoluteSize and target.AbsoluteSize.X > 0 and target.AbsoluteSize.Y > 0 then
+                                clone.Size = UDim2.fromOffset(target.AbsoluteSize.X, target.AbsoluteSize.Y)
+                            end
+                            for _, child in ipairs(clone:GetDescendants()) do
+                                if child:IsA("Script") or child:IsA("LocalScript") or child:IsA("ModuleScript") then child:Destroy() end
+                            end
+                            saveTargets[#saveTargets + 1] = screen
+                        else saveTargets[#saveTargets + 1] = target end
+                    end
+                    local group = allUI and "UI" or (anyUI and "Mixed" or "Models")
+                    local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
+                    if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
+                    local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
+                    if safeName == "" then safeName = "Export" end
+                    local prefix = "Paraware-" .. group .. "-"
+                    if makefolder then
+                        local made = pcall(function()
+                            for _, folder in ipairs({ "Paraware-Exports", "Paraware-Exports/" .. group }) do
+                                if not isfolder or not isfolder(folder) then makefolder(folder) end
+                            end
+                        end)
+                        if made then prefix = "Paraware-Exports/" .. group .. "/" end
+                    end
+                    repeat
+                        exportCounter = exportCounter + 1
+                        path = prefix .. safeName .. "-" .. os.date("%Y%m%d-%H%M%S") .. "-" .. exportCounter .. ".rbxm"
+                    until not isfile or not isfile(path)
+                    exportMessage("Exporting " .. index .. " / " .. #batches, name .. "\nSerializing " .. #batch .. " selected root(s). Keep targets loaded.")
+                    exporter({
+                        ExtraInstances = saveTargets, IsModel = true, mode = "selected", Binary = true, CompressionMode = false,
+                        Decompile = false, SaveBytecode = false, ReadMe = false,
+                        IgnoreList = { "Script", "LocalScript", "ModuleScript" },
+                        SafeMode = false, KillAllScripts = false, BoostFPS = false,
+                        ShutdownWhenDone = false, AntiIdle = false, ShowStatus = false,
+                        SavePlayerCharacters = true, IgnoreDefaultPlayerScripts = false,
+                        FilePath = path,
+                        Callback = function(data)
+                            if not Session.Alive or cancelExport then return end
+                            assert(not wrote, "Exporter returned more than one result for this file")
+                            assert(type(data) == "string" and data:sub(1, 8) == "<roblox!", "Exporter returned invalid binary model data")
+                            writefile(path, data)
+                            if isfile then assert(isfile(path), "Runtime did not create the output file") end
+                            if readfile then assert(readfile(path) == data, "Output file failed byte-for-byte verification") end
+                            wrote, bytes = true, #data
+                        end,
+                    })
+                    assert(wrote or cancelExport or not Session.Alive, "Exporter produced no file. It may be busy or unsupported.")
+                end)
+                for i = #temporary, 1, -1 do temporary[i]:Destroy() end
+                if wrote and ok then
+                    successes, lastExportPath = successes + 1, path
+                    exportHistory[#exportHistory + 1] = { Path = path, Bytes = bytes, Roots = #batch, Time = os.date("%H:%M:%S") }
+                    if #exportHistory > 10 then table.remove(exportHistory, 1) end
+                    updateHistory()
+                    log("Saved " .. path .. " (" .. bytes .. " bytes)")
+                elseif not cancelExport and Session.Alive then
+                    failures = failures + 1
+                    errors[#errors + 1] = (#batch == 1 and batch[1].Name or "Selection") .. ": " .. tostring(err)
+                    log("Export failed: " .. errors[#errors])
+                end
+                if #batches > 1 then task.wait() end
+            end
+        else failures, errors = #batches, { tostring(loadError) } end
         exportBusy = false
         if not Session.Alive then return end
-        if ok and wrote then
-            lastExportPath = path
-            exportMessage("Model saved", path .. "\n" .. #targets .. " root(s) saved together. Open this .rbxm in Roblox Studio.")
-            notify("Saved " .. path)
+        if cancelExport then
+            exportMessage("Export cancelled", successes .. " file(s) saved before cancellation. Selection is kept. An active serialization cannot be interrupted; cancellation skips its pending write and the remaining files.")
+        elseif failures > 0 then
+            exportMessage(successes > 0 and "Export partially saved" or "Export failed", successes .. " saved / " .. failures .. " failed\n" .. table.concat(errors, "\n") .. "\nSelection is kept for retry.")
         else
-            exportMessage("Export failed", tostring(err) .. "\nYour selection is kept. Use Export selected to retry.")
-            log("Export failed: " .. tostring(err))
+            exportMessage("Model saved", successes .. " file(s) saved\n" .. lastExportPath .. "\nOpen .rbxm files in Roblox Studio. UI belongs in StarterGui or PlayerGui.")
+            notify("Saved " .. successes .. " export file(s).")
         end
     end)
 end
@@ -629,7 +712,7 @@ local function build()
     })
     characterStatus = settings:Paragraph({ Title = "Character", Desc = "Waiting for your character..." })
     if logo == "" then home:Paragraph({ Title = "PW / Paraware", Desc = logoStatus }) end
-    home:Button({ Title = "Launch DexPlusPlus", Desc = "Open the Stable 3.0 instance explorer in its own window.", Icon = "folder-search", Callback = launchDex })
+    home:Button({ Title = "Launch Cobalt", Desc = "Open Cobalt in its own window.", Icon = "code", Callback = launchCobalt })
 
     local function toggle(tab, key, title, desc, callback)
         toggles[key] = tab:Toggle({ Title = title, Desc = desc, Value = false, Callback = callback })
@@ -712,7 +795,30 @@ local function build()
     local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part", "Whole ScreenGui", "UI panel", "UI element" }, Value = state.PickMode,
         Callback = function(value) state.PickMode = value; if uiMode() then refreshUIBrowser() end end })
     selectionSummary = assets:Paragraph({ Title = "Selected: 0", Desc = "Nothing selected. Click a target to add it; click it again to remove it." })
-    assets:Button({ Title = "Export selected", Icon = "download", Callback = exportSelection })
+    selectedDropdown = assets:Dropdown({ Title = "Selected targets", Values = { "Nothing selected" }, Value = "Nothing selected", SearchBarEnabled = true, Callback = function(value)
+        selectionChoice = selectedEntries and selectedEntries[value]
+        if selectionChoice then
+            local target = selectionChoice
+            local size = target:IsA("GuiObject") and target.AbsoluteSize
+            selectedDetails:SetDesc(target:GetFullName() .. "\nClass: " .. target.ClassName .. (size and ("\nSize: " .. math.floor(size.X) .. " × " .. math.floor(size.Y) .. " px") or "") .. "\nIncludes loaded descendants. Scripts are excluded.")
+            if isUI(target) then lastPickedUI = target end
+        end
+    end })
+    selectedDetails = assets:Paragraph({ Title = "Target details", Desc = "Choose a selected target to inspect or remove it." })
+    assets:Button({ Title = "Remove selected target", Callback = function()
+        if not selectionChoice then notify("Choose a target in Selected targets first."); return end
+        toggleSelection(selectionChoice)
+    end })
+    local files = assets:Section({ Title = "Export settings", Icon = "file-cog", Opened = false, Box = true })
+    files:Dropdown({ Title = "File layout", Values = { "Together", "Separate files" }, Value = exportLayout, Callback = function(value) exportLayout = value end })
+    files:Input({ Title = "Filename", Placeholder = "Automatic", Value = "", Callback = function(value) customFilename = tostring(value):sub(1, 64) end })
+    files:Paragraph({ Title = "File destination", Desc = "Paraware-Exports/Models, UI, or Mixed inside your executor workspace. If folders are unavailable, filenames carry the category. Timestamps prevent overwrites." })
+    assets:Button({ Title = "Export selected", Icon = "download", Callback = function() exportSelection() end })
+    assets:Button({ Title = "Cancel export", Callback = function()
+        if not exportBusy then notify("No export is running."); return end
+        cancelExport = true
+        exportMessage("Cancellation requested", "Waiting for the active serialization to return. Its pending write and remaining files will be skipped; already saved files are kept.")
+    end })
     assets:Button({ Title = "Clear selection", Icon = "x", Callback = function() clearSelection(); exportMessage("Selection cleared", "Select targets to start a new export.") end })
     assets:Button({ Title = "Copy last export path", Icon = "copy", Callback = function()
         if not lastExportPath then notify("Export a selection first."); return end
@@ -721,6 +827,16 @@ local function build()
         notify(copied and "Export path copied." or "Could not copy the export path.")
     end })
     local browser = assets:Section({ Title = "UI browser", Icon = "panels-top-left", Opened = false, Box = true })
+    local models = assets:Section({ Title = "Model export", Icon = "box", Opened = false, Box = true })
+    models:Button({ Title = "Pick models", Callback = function()
+        state.Picker, state.PickMode = true, "Nearest model"
+        selectionMode:Select("Nearest model")
+        toggles.Picker:Set(true, false)
+        exportMessage("Model picker ready", "Click models to add/remove them. Export models only saves the model/part targets in your selection.")
+    end })
+    models:Button({ Title = "Export models only", Callback = function() exportSelection("Models") end })
+    browser:Button({ Title = "Export UI only", Callback = function() exportSelection("UI") end })
+    browser:Toggle({ Title = "Wrap UI fragments", Value = wrapFragments, Desc = "Clone panels/elements into standalone ScreenGuis. Uses their current pixel size and places each fragment at 24,24. Whole ScreenGuis stay unchanged. Turn off to preserve the original hierarchy properties.", Callback = function(value) wrapFragments = value end })
     browser:Button({ Title = "Pick UI on screen", Desc = "Enable panel picking. Point at the Index window, click to select it, then Export selected.", Callback = function()
         state.PickMode, state.Picker = "UI panel", true
         selectionMode:Select("UI panel")
@@ -736,7 +852,7 @@ local function build()
         if not present then toggleSelection(parent) else refreshSelection() end
         lastPickedUI = parent
     end })
-    browser:Paragraph({ Title = "Export an interface", Desc = "Whole ScreenGui includes the complete interface. UI element includes the chosen element and its children. Use the browser for hidden or overlapping UI. Clicking live UI can also activate its buttons. Scripts are excluded, so exported UI keeps its design but not its scripted behavior." })
+    browser:Paragraph({ Title = "Export an interface", Desc = "Whole ScreenGui includes the complete interface. UI element includes the chosen element and its children. Hover and press P to select without clicking a game's button. Use the browser for hidden or overlapping UI. Scripts are excluded, so exported UI keeps its design but not its scripted behavior." })
     uiDropdown = browser:Dropdown({ Title = "UI target", SearchBarEnabled = true, Values = { "Refresh to list UI" }, Value = "Refresh to list UI", Callback = function(value) uiChoice = uiEntries and uiEntries[value] end })
     browser:Button({ Title = "Refresh UI list", Callback = refreshUIBrowser })
     browser:Button({ Title = "Add / remove UI selection", Callback = function()
@@ -744,6 +860,15 @@ local function build()
         toggleSelection(uiChoice)
     end })
     exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Choose a selection mode, then enable the picker or use the UI browser." })
+    historyStatus = assets:Paragraph({ Title = "Recent exports", Desc = "No files saved this session." })
+    assets:Button({ Title = "Copy export history", Callback = function()
+        if #exportHistory == 0 then notify("No files saved this session."); return end
+        if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
+        local paths = {}
+        for _, item in ipairs(exportHistory) do paths[#paths + 1] = item.Path end
+        local copied = pcall(setclipboard, table.concat(paths, "\n"))
+        notify(copied and "Export history copied." or "Could not copy export history.")
+    end })
     assets:Paragraph({ Title = "Exporter", Desc = "UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw\nExports loaded client objects. Scripts are excluded. Files are written to your executor's workspace." })
 
     local consoleTab = settings
@@ -7190,6 +7315,11 @@ connect(Input.InputBegan, function(input, processed)
         return
     end
     if processed or Input:GetFocusedTextBox() then return end
+    if state.Picker and uiMode() and input.KeyCode == Enum.KeyCode.P then
+        local target = pickUI(Input:GetMouseLocation())
+        if target then toggleSelection(target) else exportMessage("No UI target found", "Hover over a game interface or choose a target in the UI browser.") end
+        return
+    end
     if input.KeyCode == Config.FlyKey then
         setFly(not state.Fly)
         toggles.Fly:Set(state.Fly, false)
@@ -7237,6 +7367,21 @@ uiPreviewLabel.TextWrapped, uiPreviewLabel.Active, uiPreviewLabel.Visible = true
 uiPreviewLabel.Parent = uiPreviewGui
 connect(RunService.RenderStepped, function()
     if not pickerHighlight then return end
+    for _, target in ipairs(selected) do if not target.Parent then refreshSelection(); break end end
+    for target, outline in pairs(selectionHighlights) do
+        if outline:IsA("Frame") then
+            outline.Visible = target.Parent ~= nil and target.Visible ~= false and target.AbsolutePosition ~= nil and target.AbsoluteSize ~= nil
+            local ancestor = target.Parent
+            while outline.Visible and ancestor do
+                if (ancestor:IsA("GuiObject") and ancestor.Visible == false) or (ancestor:IsA("ScreenGui") and ancestor.Enabled == false) then outline.Visible = false end
+                ancestor = ancestor.Parent
+            end
+            if outline.Visible then
+                outline.Position = UDim2.fromOffset(target.AbsolutePosition.X, target.AbsolutePosition.Y)
+                outline.Size = UDim2.fromOffset(target.AbsoluteSize.X, target.AbsoluteSize.Y)
+            end
+        end
+    end
     uiPreviewBox.Visible, uiPreviewLabel.Visible = false, false
     hoveredUI = nil
     if state.Picker and uiMode() and windowFocused and Input.MouseEnabled then
@@ -7245,7 +7390,7 @@ connect(RunService.RenderStepped, function()
         if hoveredUI then
             local selectedTarget = false
             for _, target in ipairs(selected) do if target == hoveredUI then selectedTarget = true; break end end
-            uiPreviewLabel.Text = hoveredUI.Name .. " [" .. hoveredUI.ClassName .. "]\n" .. (selectedTarget and "Click to unselect" or "Click to select / Export selected to save")
+            uiPreviewLabel.Text = hoveredUI.Name .. " [" .. hoveredUI.ClassName .. "]\n" .. (selectedTarget and "Click or P to unselect" or "Click or P to select / Export selected to save")
             local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1440, 900)
             uiPreviewLabel.Position = UDim2.fromOffset(math.max(0, math.min(position.X + 16, viewport.X - 330)), math.max(0, math.min(position.Y + 24, viewport.Y - 40)))
             uiPreviewLabel.Visible = true
