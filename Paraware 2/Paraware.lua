@@ -60,6 +60,7 @@ local Window
 local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
 local lastExportPath
+local uiPreviewGui, uiPreviewBox, uiPreviewLabel, hoveredUI, lastPickedUI
 local selected, selectionHighlights = {}, {}
 local selectionSummary, uiDropdown, uiEntries, uiChoice
 local clearSelection, refreshSelection
@@ -284,6 +285,7 @@ local function cleanup()
     Session.Alive = false
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if pickerHighlight then pickerHighlight:Destroy(); pickerHighlight = nil end
+    if uiPreviewGui then uiPreviewGui:Destroy(); uiPreviewGui = nil end
     if clearSelection then clearSelection() end
     for i = #cleanups, 1, -1 do
         local ok, err = pcall(cleanups[i])
@@ -341,10 +343,11 @@ local function overHub(position)
 end
 
 local function uiMode()
-    return state.PickMode == "Whole ScreenGui" or state.PickMode == "UI element"
+    return state.PickMode == "Whole ScreenGui" or state.PickMode == "UI panel" or state.PickMode == "UI element"
 end
 
 local function ownUI(object)
+    if uiPreviewGui and (object == uiPreviewGui or object:IsDescendantOf(uiPreviewGui)) then return true end
     local main = Window and Window.UIElements and Window.UIElements.Main
     if not main or not main.FindFirstAncestorOfClass then return false end
     local screen = main:FindFirstAncestorOfClass("ScreenGui")
@@ -362,6 +365,18 @@ local function pickUI(position)
             for _, object in ipairs(objects) do
                 if not ownUI(object) then
                     if state.PickMode == "Whole ScreenGui" then return object:FindFirstAncestorOfClass("ScreenGui") end
+                    if state.PickMode == "UI panel" then
+                        local candidate, cursor = object, object
+                        local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize
+                        while cursor and cursor:IsA("GuiObject") do
+                            local size = cursor.AbsoluteSize
+                            if cursor:IsA("Frame") or cursor:IsA("ScrollingFrame") or cursor:IsA("CanvasGroup") then
+                                if size and size.X > 0 and size.Y > 0 and (not viewport or size.X < viewport.X * 0.95 or size.Y < viewport.Y * 0.95) then candidate = cursor end
+                            end
+                            cursor = cursor.Parent
+                        end
+                        return candidate
+                    end
                     return object
                 end
             end
@@ -391,6 +406,7 @@ end
 clearSelection = function()
     for _, highlight in pairs(selectionHighlights) do highlight:Destroy() end
     selected, selectionHighlights = {}, {}
+    lastPickedUI = nil
     refreshSelection()
 end
 
@@ -399,6 +415,7 @@ local function toggleSelection(target)
     for i, object in ipairs(selected) do
         if object == target then
             table.remove(selected, i)
+            if lastPickedUI == target then lastPickedUI = nil end
             if selectionHighlights[target] then selectionHighlights[target]:Destroy(); selectionHighlights[target] = nil end
             refreshSelection()
             exportMessage("Removed " .. target.Name, "Click the same target again to select it.")
@@ -407,6 +424,7 @@ local function toggleSelection(target)
     end
     if #selected >= 64 then notify("Selection limit reached: 64 targets. Export or clear the selection first."); return end
     selected[#selected + 1] = target
+    if target:IsA("GuiObject") or target:IsA("ScreenGui") then lastPickedUI = target end
     if target:IsA("Model") or target:IsA("BasePart") then
         local highlight = Instance.new("Highlight")
         highlight.Name, highlight.Adornee = "ParawareSelected", target
@@ -429,7 +447,7 @@ local function refreshUIBrowser()
         local readable, descendants = pcall(container.GetDescendants, container)
         if readable then
             for _, object in ipairs(descendants) do
-                if not seen[object] and not ownUI(object) and (object:IsA("ScreenGui") or (state.PickMode == "UI element" and object:IsA("GuiObject"))) then
+                if not seen[object] and not ownUI(object) and (object:IsA("ScreenGui") or ((state.PickMode == "UI element" or state.PickMode == "UI panel") and object:IsA("GuiObject"))) then
                     seen[object] = true
                     if #values >= 1000 then break end
                     local key = tostring(#values + 1) .. " / " .. object:GetFullName() .. " [" .. object.ClassName .. "]"
@@ -691,7 +709,7 @@ local function build()
         exportMessage(value and "Picker ready" or "Picker off", value and "Click targets outside the hub, then Export selected." or "Selection is kept. You can still export or clear it.")
         log("Object picker " .. tostring(value))
     end)
-    assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part", "Whole ScreenGui", "UI element" }, Value = state.PickMode,
+    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part", "Whole ScreenGui", "UI panel", "UI element" }, Value = state.PickMode,
         Callback = function(value) state.PickMode = value; if uiMode() then refreshUIBrowser() end end })
     selectionSummary = assets:Paragraph({ Title = "Selected: 0", Desc = "Nothing selected. Click a target to add it; click it again to remove it." })
     assets:Button({ Title = "Export selected", Icon = "download", Callback = exportSelection })
@@ -703,6 +721,21 @@ local function build()
         notify(copied and "Export path copied." or "Could not copy the export path.")
     end })
     local browser = assets:Section({ Title = "UI browser", Icon = "panels-top-left", Opened = false, Box = true })
+    browser:Button({ Title = "Pick UI on screen", Desc = "Enable panel picking. Point at the Index window, click to select it, then Export selected.", Callback = function()
+        state.PickMode, state.Picker = "UI panel", true
+        selectionMode:Select("UI panel")
+        toggles.Picker:Set(true, false)
+        exportMessage("UI picker ready", "Point at an interface to preview its panel. Click to select; click again to remove. Export selected saves your selection.")
+    end })
+    browser:Button({ Title = "Select parent UI", Desc = "If the selected element is too small, replace it with its parent. Repeat to reach the entire panel or ScreenGui.", Callback = function()
+        local parent = lastPickedUI and lastPickedUI.Parent
+        if not parent or not (parent:IsA("GuiObject") or parent:IsA("ScreenGui")) or ownUI(parent) then notify("Pick a UI element first, or choose a target in the UI browser."); return end
+        for i, target in ipairs(selected) do if target == lastPickedUI then table.remove(selected, i); break end end
+        local present = false
+        for _, target in ipairs(selected) do if target == parent then present = true; break end end
+        if not present then toggleSelection(parent) else refreshSelection() end
+        lastPickedUI = parent
+    end })
     browser:Paragraph({ Title = "Export an interface", Desc = "Whole ScreenGui includes the complete interface. UI element includes the chosen element and its children. Use the browser for hidden or overlapping UI. Clicking live UI can also activate its buttons. Scripts are excluded, so exported UI keeps its design but not its scripted behavior." })
     uiDropdown = browser:Dropdown({ Title = "UI target", SearchBarEnabled = true, Values = { "Refresh to list UI" }, Value = "Refresh to list UI", Callback = function(value) uiChoice = uiEntries and uiEntries[value] end })
     browser:Button({ Title = "Refresh UI list", Callback = refreshUIBrowser })
@@ -7188,8 +7221,41 @@ pickerHighlight.FillTransparency = 0.85
 pickerHighlight.OutlineTransparency = 0.15
 pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 pickerHighlight.Parent = workspace
+uiPreviewGui = Instance.new("ScreenGui")
+uiPreviewGui.Name, uiPreviewGui.ResetOnSpawn = "ParawareUIPreview", false
+uiPreviewGui.IgnoreGuiInset, uiPreviewGui.DisplayOrder = true, 10050
+uiPreviewGui.Parent = Player:WaitForChild("PlayerGui")
+uiPreviewBox = Instance.new("Frame")
+uiPreviewBox.Name, uiPreviewBox.BackgroundTransparency = "TargetOutline", 1
+uiPreviewBox.BorderSizePixel, uiPreviewBox.BorderColor3 = 2, Color3.fromHex("#9BC9FF")
+uiPreviewBox.Active, uiPreviewBox.Visible, uiPreviewBox.Parent = false, false, uiPreviewGui
+uiPreviewLabel = Instance.new("TextLabel")
+uiPreviewLabel.Name, uiPreviewLabel.Size = "TargetName", UDim2.fromOffset(330, 40)
+uiPreviewLabel.BackgroundColor3, uiPreviewLabel.BackgroundTransparency = Color3.fromHex("#111111"), 0.1
+uiPreviewLabel.TextColor3, uiPreviewLabel.Font, uiPreviewLabel.TextSize = Color3.fromHex("#FFFFFF"), Enum.Font.GothamMedium, 12
+uiPreviewLabel.TextWrapped, uiPreviewLabel.Active, uiPreviewLabel.Visible = true, false, false
+uiPreviewLabel.Parent = uiPreviewGui
 connect(RunService.RenderStepped, function()
     if not pickerHighlight then return end
+    uiPreviewBox.Visible, uiPreviewLabel.Visible = false, false
+    hoveredUI = nil
+    if state.Picker and uiMode() and windowFocused and Input.MouseEnabled then
+        local position = Input:GetMouseLocation()
+        hoveredUI = pickUI(position)
+        if hoveredUI then
+            local selectedTarget = false
+            for _, target in ipairs(selected) do if target == hoveredUI then selectedTarget = true; break end end
+            uiPreviewLabel.Text = hoveredUI.Name .. " [" .. hoveredUI.ClassName .. "]\n" .. (selectedTarget and "Click to unselect" or "Click to select / Export selected to save")
+            local viewport = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1440, 900)
+            uiPreviewLabel.Position = UDim2.fromOffset(math.max(0, math.min(position.X + 16, viewport.X - 330)), math.max(0, math.min(position.Y + 24, viewport.Y - 40)))
+            uiPreviewLabel.Visible = true
+            if hoveredUI:IsA("GuiObject") and hoveredUI.AbsolutePosition and hoveredUI.AbsoluteSize then
+                uiPreviewBox.Position = UDim2.fromOffset(hoveredUI.AbsolutePosition.X, hoveredUI.AbsolutePosition.Y)
+                uiPreviewBox.Size = UDim2.fromOffset(hoveredUI.AbsoluteSize.X, hoveredUI.AbsoluteSize.Y)
+                uiPreviewBox.Visible = true
+            end
+        end
+    end
     if state.Picker and not uiMode() and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
         pickerHighlight.Adornee = pickObject(Input:GetMouseLocation())
     else
