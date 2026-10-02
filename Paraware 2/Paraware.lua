@@ -9,6 +9,8 @@ local Config = {
     FlyKey = Enum.KeyCode.F,
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
+    CobaltUrl = "https://gitlab.com/upio/cobalt/-/releases/permalink/latest/downloads/Cobalt.luau",
+    CobaltTelemetryUrl = "https://rscripts.net/api/telemetry/v2/client.lua?s=6a7b7047babc0d780d20b9e7",
 }
 local embeddedLogo
 
@@ -58,6 +60,7 @@ local logs, console, characterStatus = {}, nil, nil
 local Window
 local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
+local cobaltBusy, cobaltLoaded = false, false
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -110,6 +113,43 @@ local function notify(message)
     if Session.Alive then
         WindUI:Notify({ Title = "Paraware", Content = message, Duration = 3 })
     end
+end
+
+local function launchCobalt()
+    if not Session.Alive then return end
+    if cobaltBusy then notify("Cobalt is already loading."); return end
+    if cobaltLoaded then notify("Cobalt has already launched this session."); return end
+    cobaltBusy = true
+    log("Loading Cobalt...")
+    -- The supplied telemetry loader runs separately, so its failure cannot block Cobalt.
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local source = game:HttpGet(Config.CobaltTelemetryUrl)
+            if not Session.Alive then return end
+            local chunk, compileError = loadstring(source, "CobaltTelemetry")
+            assert(chunk, compileError)
+            chunk()
+        end)
+        if not ok and Session.Alive then log("Cobalt telemetry failed: " .. tostring(err)) end
+    end)
+    task.spawn(function()
+        local ok, err = pcall(function()
+            local source = game:HttpGet(Config.CobaltUrl)
+            if not Session.Alive then return end
+            local chunk, compileError = loadstring(source, "Cobalt")
+            assert(chunk, compileError)
+            chunk()
+        end)
+        cobaltBusy = false
+        if not Session.Alive then return end
+        if ok then
+            cobaltLoaded = true
+            notify("Cobalt launched in its own window.")
+        else
+            notify("Cobalt failed to load. Check Session log, then retry.")
+            log("Cobalt error: " .. tostring(err))
+        end
+    end)
 end
 
 local function restoreCollisions()
@@ -461,6 +501,7 @@ local function build()
     })
     characterStatus = settings:Paragraph({ Title = "Character", Desc = "Waiting for your character..." })
     if logo == "" then home:Paragraph({ Title = "PW / Paraware", Desc = logoStatus }) end
+    home:Button({ Title = "Launch Cobalt", Desc = "Open Cobalt in its own window.", Icon = "external-link", Callback = launchCobalt })
 
     local function toggle(tab, key, title, desc, callback)
         toggles[key] = tab:Toggle({ Title = title, Desc = desc, Value = false, Callback = callback })
