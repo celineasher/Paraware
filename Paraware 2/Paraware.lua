@@ -59,6 +59,10 @@ local logs, console, characterStatus = {}, nil, nil
 local Window
 local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
+local lastExportPath
+local selected, selectionHighlights = {}, {}
+local selectionSummary, uiDropdown, uiEntries, uiChoice
+local clearSelection, refreshSelection
 local dexBusy, dexLoaded = false, false
 
 local function decodeBase64(data)
@@ -266,6 +270,7 @@ local function reset()
     state.Fly, state.InfiniteJump, state.Noclip = false, false, false
     state.Altitude = "Level"
     state.Picker = false
+    if clearSelection then clearSelection() end
     if pickerHighlight then pickerHighlight.Adornee = nil end
     restoreCharacter()
     setFov(false)
@@ -279,6 +284,7 @@ local function cleanup()
     Session.Alive = false
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if pickerHighlight then pickerHighlight:Destroy(); pickerHighlight = nil end
+    if clearSelection then clearSelection() end
     for i = #cleanups, 1, -1 do
         local ok, err = pcall(cleanups[i])
         if not ok then warn("[Paraware] Module cleanup: " .. tostring(err)) end
@@ -334,7 +340,111 @@ local function overHub(position)
         and position.Y >= origin.Y and position.Y <= origin.Y + size.Y
 end
 
+local function uiMode()
+    return state.PickMode == "Whole ScreenGui" or state.PickMode == "UI element"
+end
+
+local function ownUI(object)
+    local main = Window and Window.UIElements and Window.UIElements.Main
+    if not main or not main.FindFirstAncestorOfClass then return false end
+    local screen = main:FindFirstAncestorOfClass("ScreenGui")
+    return screen and (object == screen or object:IsDescendantOf(screen)) or false
+end
+
+local function pickUI(position)
+    if overHub(position) then return nil end
+    local roots = { Player:FindFirstChild("PlayerGui") }
+    local ok, core = pcall(game.GetService, game, "CoreGui")
+    if ok and core then roots[#roots + 1] = core end
+    for _, container in ipairs(roots) do
+        local accessible, objects = pcall(container.GetGuiObjectsAtPosition, container, position.X, position.Y)
+        if accessible then
+            for _, object in ipairs(objects) do
+                if not ownUI(object) then
+                    if state.PickMode == "Whole ScreenGui" then return object:FindFirstAncestorOfClass("ScreenGui") end
+                    return object
+                end
+            end
+        end
+    end
+end
+
+refreshSelection = function()
+    local names = {}
+    for i = #selected, 1, -1 do
+        local target = selected[i]
+        if not target.Parent then
+            if selectionHighlights[target] then selectionHighlights[target]:Destroy(); selectionHighlights[target] = nil end
+            table.remove(selected, i)
+        end
+    end
+    for i, target in ipairs(selected) do
+        if i <= 8 then names[#names + 1] = target.Name .. " (" .. target.ClassName .. ")" end
+    end
+    if #selected > 8 then names[#names + 1] = "+ " .. (#selected - 8) .. " more" end
+    if selectionSummary then
+        selectionSummary:SetTitle("Selected: " .. #selected)
+        selectionSummary:SetDesc(#names > 0 and table.concat(names, "\n") or "Nothing selected. Click a target to add it; click it again to remove it.")
+    end
+end
+
+clearSelection = function()
+    for _, highlight in pairs(selectionHighlights) do highlight:Destroy() end
+    selected, selectionHighlights = {}, {}
+    refreshSelection()
+end
+
+local function toggleSelection(target)
+    if not target or not target.Parent or ownUI(target) then return end
+    for i, object in ipairs(selected) do
+        if object == target then
+            table.remove(selected, i)
+            if selectionHighlights[target] then selectionHighlights[target]:Destroy(); selectionHighlights[target] = nil end
+            refreshSelection()
+            exportMessage("Removed " .. target.Name, "Click the same target again to select it.")
+            return
+        end
+    end
+    if #selected >= 64 then notify("Selection limit reached: 64 targets. Export or clear the selection first."); return end
+    selected[#selected + 1] = target
+    if target:IsA("Model") or target:IsA("BasePart") then
+        local highlight = Instance.new("Highlight")
+        highlight.Name, highlight.Adornee = "ParawareSelected", target
+        highlight.FillColor, highlight.OutlineColor = Color3.fromHex("#9BC9FF"), Color3.fromHex("#FFFFFF")
+        highlight.FillTransparency, highlight.OutlineTransparency = 0.8, 0.1
+        highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.Occluded, workspace
+        selectionHighlights[target] = highlight
+    end
+    refreshSelection()
+    exportMessage("Added " .. target.Name, "Click again to unselect. Use Export selected when ready.")
+end
+
+local function refreshUIBrowser()
+    uiEntries, uiChoice = {}, nil
+    local values, roots = {}, { Player:FindFirstChild("PlayerGui") }
+    local ok, core = pcall(game.GetService, game, "CoreGui")
+    if ok and core then roots[#roots + 1] = core end
+    local seen = {}
+    for _, container in ipairs(roots) do
+        local readable, descendants = pcall(container.GetDescendants, container)
+        if readable then
+            for _, object in ipairs(descendants) do
+                if not seen[object] and not ownUI(object) and (object:IsA("ScreenGui") or (state.PickMode == "UI element" and object:IsA("GuiObject"))) then
+                    seen[object] = true
+                    if #values >= 1000 then break end
+                    local key = tostring(#values + 1) .. " / " .. object:GetFullName() .. " [" .. object.ClassName .. "]"
+                    values[#values + 1], uiEntries[key] = key, object
+                end
+            end
+        end
+    end
+    if #values == 0 then values[1] = "No accessible UI found" end
+    uiDropdown:Refresh(values)
+    exportMessage("UI browser refreshed", "Found " .. (#values == 1 and not uiEntries[values[1]] and 0 or #values) .. " entries. Choose an entry, then Add / remove UI selection. Lists up to 1,000 entries.")
+end
+
 local function pickObject(position)
+    if uiMode() then return pickUI(position) end
     if overHub(position) then return nil end
     local camera = workspace.CurrentCamera
     if not camera then return nil end
@@ -352,15 +462,25 @@ local function pickObject(position)
     return target
 end
 
-local function exportObject(target)
-    if exportBusy or not target or not target.Parent then return end
+local function exportSelection()
+    if exportBusy then notify("An export is already running."); return end
+    refreshSelection()
+    local targets = {}
+    for _, target in ipairs(selected) do
+        local covered = false
+        for _, ancestor in ipairs(selected) do
+            if target ~= ancestor and target:IsDescendantOf(ancestor) then covered = true; break end
+        end
+        if not covered then targets[#targets + 1] = target end
+    end
+    if #targets == 0 then exportMessage("Nothing to export", "Select one or more models, parts, or UI elements first."); return end
     if not writefile then
         exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files.")
         notify("Object export requires writefile.")
         return
     end
     exportBusy = true
-    local name = target.Name
+    local name = #targets == 1 and targets[1].Name or ("Selection-" .. #targets)
     exportMessage("Preparing " .. name, "Loading the model exporter. Keep the object loaded.")
     task.spawn(function()
         local wrote, path = false, nil
@@ -370,6 +490,7 @@ local function exportObject(target)
                 assert(type(exporter) == "function", "Exporter did not return a function")
             end
             if not Session.Alive then return end
+            for _, target in ipairs(targets) do assert(target.Parent, "A selected target was removed. Refresh your selection and retry.") end
             local safeName = name:gsub("[^%w_-]", "_"):sub(1, 48)
             if safeName == "" then safeName = "object" end
             local prefix = "Paraware-"
@@ -385,7 +506,7 @@ local function exportObject(target)
             until not isfile or not isfile(path)
             exportMessage("Saving " .. name, "Serializing this object and its loaded descendants...")
             exporter({
-                Object = target, IsModel = true, mode = "full", Binary = true, CompressionMode = false,
+                ExtraInstances = targets, IsModel = true, mode = "selected", Binary = true, CompressionMode = false,
                 Decompile = false, SaveBytecode = false, ReadMe = false,
                 IgnoreList = { "Script", "LocalScript", "ModuleScript" },
                 SafeMode = false, KillAllScripts = false, BoostFPS = false,
@@ -409,10 +530,11 @@ local function exportObject(target)
         exportBusy = false
         if not Session.Alive then return end
         if ok and wrote then
-            exportMessage("Model saved", path .. "\nOpen this .rbxm in Roblox Studio.")
+            lastExportPath = path
+            exportMessage("Model saved", path .. "\n" .. #targets .. " root(s) saved together. Open this .rbxm in Roblox Studio.")
             notify("Saved " .. path)
         else
-            exportMessage("Export failed", tostring(err) .. "\nCheck runtime support, then click the object again.")
+            exportMessage("Export failed", tostring(err) .. "\nYour selection is kept. Use Export selected to retry.")
             log("Export failed: " .. tostring(err))
         end
     end)
@@ -562,16 +684,33 @@ local function build()
         log("Fullbright " .. tostring(value))
     end)
 
-    assets:Paragraph({ Title = "Click to save a model", Desc = "Enable the picker, then click or tap an object in the world. Saves the selected object and loaded descendants as a binary .rbxm model." })
-    toggle(assets, "Picker", "Object picker", "Highlights the target under your cursor. Clicking exports it.", function(value)
+    assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models, parts, or UI objects. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
+    toggle(assets, "Picker", "Object picker", "Click to add or remove a target. Selecting does not save a file.", function(value)
         state.Picker = value
         if not value and pickerHighlight then pickerHighlight.Adornee = nil end
-        exportMessage(value and "Picker ready" or "Picker off", value and "Click an object outside the hub to save it." or "Enable the picker to choose an object.")
+        exportMessage(value and "Picker ready" or "Picker off", value and "Click targets outside the hub, then Export selected." or "Selection is kept. You can still export or clear it.")
         log("Object picker " .. tostring(value))
     end)
-    assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part" }, Value = state.PickMode,
-        Callback = function(value) state.PickMode = value end })
-    exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Enable the picker to choose an object." })
+    assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part", "Whole ScreenGui", "UI element" }, Value = state.PickMode,
+        Callback = function(value) state.PickMode = value; if uiMode() then refreshUIBrowser() end end })
+    selectionSummary = assets:Paragraph({ Title = "Selected: 0", Desc = "Nothing selected. Click a target to add it; click it again to remove it." })
+    assets:Button({ Title = "Export selected", Icon = "download", Callback = exportSelection })
+    assets:Button({ Title = "Clear selection", Icon = "x", Callback = function() clearSelection(); exportMessage("Selection cleared", "Select targets to start a new export.") end })
+    assets:Button({ Title = "Copy last export path", Icon = "copy", Callback = function()
+        if not lastExportPath then notify("Export a selection first."); return end
+        if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
+        local copied = pcall(setclipboard, lastExportPath)
+        notify(copied and "Export path copied." or "Could not copy the export path.")
+    end })
+    local browser = assets:Section({ Title = "UI browser", Icon = "panels-top-left", Opened = false, Box = true })
+    browser:Paragraph({ Title = "Export an interface", Desc = "Whole ScreenGui includes the complete interface. UI element includes the chosen element and its children. Use the browser for hidden or overlapping UI. Clicking live UI can also activate its buttons. Scripts are excluded, so exported UI keeps its design but not its scripted behavior." })
+    uiDropdown = browser:Dropdown({ Title = "UI target", SearchBarEnabled = true, Values = { "Refresh to list UI" }, Value = "Refresh to list UI", Callback = function(value) uiChoice = uiEntries and uiEntries[value] end })
+    browser:Button({ Title = "Refresh UI list", Callback = refreshUIBrowser })
+    browser:Button({ Title = "Add / remove UI selection", Callback = function()
+        if not uiChoice or not uiChoice.Parent then notify("Refresh the UI list and choose a valid entry first."); return end
+        toggleSelection(uiChoice)
+    end })
+    exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Choose a selection mode, then enable the picker or use the UI browser." })
     assets:Paragraph({ Title = "Exporter", Desc = "UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw\nExports loaded client objects. Scripts are excluded. Files are written to your executor's workspace." })
 
     local consoleTab = settings
@@ -7011,21 +7150,35 @@ end)
 if Player.Character then task.spawn(bindCharacter, Player.Character) end
 
 connect(Input.InputBegan, function(input, processed)
-    if processed or Input:GetFocusedTextBox() then return end
     if state.Picker and input.UserInputType == Enum.UserInputType.MouseButton1 then
+        if (processed and not uiMode()) or (Input:GetFocusedTextBox() and not uiMode()) then return end
         local target = pickObject(input.Position)
-        if target then exportObject(target) else exportMessage("No object selected", "Click a loaded object within reach. Terrain is not supported.") end
+        if target then toggleSelection(target) elseif not overHub(input.Position) then exportMessage("No target found", "Choose another target or use the UI browser. Terrain is not supported.") end
         return
     end
+    if processed or Input:GetFocusedTextBox() then return end
     if input.KeyCode == Config.FlyKey then
         setFly(not state.Fly)
         toggles.Fly:Set(state.Fly, false)
     end
 end)
 connect(Input.TouchTapInWorld, function(position, processed)
-    if processed or not state.Picker or Input:GetFocusedTextBox() then return end
+    if processed or not state.Picker or uiMode() or Input:GetFocusedTextBox() then return end
     local target = pickObject(position)
-    if target then exportObject(target) else exportMessage("No object selected", "Tap a loaded object. Terrain is not supported.") end
+    if target then toggleSelection(target) else exportMessage("No target found", "Tap a loaded object. Terrain is not supported.") end
+end)
+local uiTouchStart
+connect(Input.InputBegan, function(input)
+    if input.UserInputType == Enum.UserInputType.Touch and state.Picker and uiMode() then uiTouchStart = input.Position end
+end)
+connect(Input.InputEnded, function(input)
+    if input.UserInputType ~= Enum.UserInputType.Touch then return end
+    local start = uiTouchStart
+    uiTouchStart = nil
+    if start and state.Picker and uiMode() and (input.Position - start).Magnitude < 16 then
+        local target = pickUI(input.Position)
+        if target then toggleSelection(target) end
+    end
 end)
 pickerHighlight = Instance.new("Highlight")
 pickerHighlight.Name = "ParawareObjectPicker"
@@ -7037,7 +7190,7 @@ pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 pickerHighlight.Parent = workspace
 connect(RunService.RenderStepped, function()
     if not pickerHighlight then return end
-    if state.Picker and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
+    if state.Picker and not uiMode() and windowFocused and not Input:GetFocusedTextBox() and Input.MouseEnabled then
         pickerHighlight.Adornee = pickObject(Input:GetMouseLocation())
     else
         pickerHighlight.Adornee = nil
