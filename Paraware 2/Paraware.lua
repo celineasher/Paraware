@@ -73,6 +73,12 @@ local soundEntries, soundConnections = {}, {}
 local soundPlayRequested, soundPaused, soundScanBusy, audioDownloadBusy = false, false, false, false
 local soundVolume, soundAutoPercent, soundUpdateClock = 0.5, 0, 0
 local destroySoundPreview
+local vfxDropdown, vfxStatus, vfxChoice, vfxPreview
+local vfxEntries = {}
+local vfxPlaying, vfxLoop, vfxScanBusy = false, false, false
+local vfxElapsed, vfxBurstClock = 0, 0
+local vfxBurst, vfxInterval, vfxDuration, vfxDistance = 30, 1, 3, 12
+local destroyVfxPreview, buildVfxRig
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -347,6 +353,7 @@ local function cleanup()
     if not Session.Alive then return end
     Session.Alive = false
     if destroySoundPreview then destroySoundPreview() end
+    if destroyVfxPreview then destroyVfxPreview() end
     for _, connection in ipairs(connections) do connection:Disconnect() end
     if pickerHighlight then pickerHighlight:Destroy(); pickerHighlight = nil end
     if clearSelection then clearSelection() end
@@ -518,6 +525,7 @@ local function exportSelection(category)
     local eligible, targets = {}, {}
     if category == "Game UI" then eligible = collectGameUI()
     elseif category == "Sound" then if soundChoice and soundChoice.Object.Parent then eligible = { soundChoice.Object } end
+    elseif category == "VFX" or category == "VFX original" then if vfxChoice and vfxChoice.Parent then eligible = { vfxChoice } end
     else
         for _, target in ipairs(selected) do eligible[#eligible + 1] = target end
     end
@@ -528,7 +536,7 @@ local function exportSelection(category)
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 then exportMessage("Nothing to export", category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
+    if #targets == 0 then exportMessage("Nothing to export", (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
     if category ~= "Game UI" and exportLayout == "Separate files" then
@@ -552,7 +560,7 @@ local function exportSelection(category)
         if loaded then
             for index, batch in ipairs(batches) do
                 if cancelExport or not Session.Alive then break end
-                local wrote, path, bytes = false, nil, 0
+                local wrote, path, bytes, exportRig = false, nil, 0, nil
                 local ok, err = pcall(function()
                     local saveTargets, allUI, anyUI = {}, true, false
                     for _, target in ipairs(batch) do
@@ -561,7 +569,8 @@ local function exportSelection(category)
                         allUI, anyUI = allUI and ui, anyUI or ui
                         saveTargets[#saveTargets + 1] = target
                     end
-                    local group = category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
+                    if category == "VFX" then exportRig = buildVfxRig(batch[1], false); saveTargets = { exportRig.Model } end
+                    local group = (category == "VFX" or category == "VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
                     if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
                     local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
@@ -600,6 +609,7 @@ local function exportSelection(category)
                     })
                     assert(wrote or cancelExport or not Session.Alive, "Exporter produced no file. It may be busy or unsupported.")
                 end)
+                if exportRig then exportRig.Model:Destroy() end
                 if wrote and ok then
                     successes, lastExportPath = successes + 1, path
                     exportHistory[#exportHistory + 1] = { Path = path, Bytes = bytes, Roots = #batch, Time = os.date("%H:%M:%S") }
@@ -795,6 +805,160 @@ local function downloadSound()
         soundMessage(ok and "Audio saved" or "Audio download failed", ok and (path .. "\n" .. string.format("%.1f KB", bytes / 1024)) or tostring(err))
         if ok then log("Saved audio " .. path) end
     end)
+end
+
+local vfxClasses = { ParticleEmitter = true, Beam = true, Trail = true, Fire = true, Smoke = true, Sparkles = true }
+local function vfxMessage(title, detail)
+    if vfxStatus and Session.Alive then vfxStatus:SetTitle(title); vfxStatus:SetDesc(detail) end
+end
+
+destroyVfxPreview = function()
+    vfxPlaying, vfxElapsed, vfxBurstClock = false, 0, 0
+    if vfxPreview then vfxPreview.Model:Destroy(); vfxPreview = nil end
+end
+
+buildVfxRig = function(source, preview)
+    assert(source and source.Parent, "The selected effect was removed. Rescan and choose another.")
+    local model = Instance.new("Model")
+    local ok, result = pcall(function()
+        model.Name = source.Name .. "_VFX"
+        local part = Instance.new("Part")
+        part.Name, part.Anchored, part.CanCollide = "EffectCarrier", true, false
+        part.CanTouch, part.CanQuery, part.Transparency = false, false, 1
+        part.Size = Vector3.new(1, 1, 1)
+        local originalPart = source:FindFirstAncestorWhichIsA("BasePart")
+        if originalPart then
+            local size = originalPart.Size
+            part.Size = Vector3.new(math.clamp(size.X, 0.1, 30), math.clamp(size.Y, 0.1, 30), math.clamp(size.Z, 0.1, 30))
+        end
+        part.Parent = model
+        local effect = source:Clone()
+        assert(effect, "This effect cannot be cloned. Export original effect instead.")
+        for _, child in ipairs(effect:GetDescendants()) do
+            if child:IsA("Script") or child:IsA("LocalScript") or child:IsA("ModuleScript") then child:Destroy() end
+        end
+        effect.Parent = part
+        local a0, a1
+        if source:IsA("Beam") or source:IsA("Trail") then
+            a0, a1 = Instance.new("Attachment"), Instance.new("Attachment")
+            a0.Name, a1.Name = "Endpoint0", "Endpoint1"
+            if source:IsA("Beam") then
+                a0.Position, a1.Position = Vector3.new(-2, 0, 0), Vector3.new(2, 0, 0)
+            else
+                a0.Position, a1.Position = Vector3.new(0, -0.5, 0), Vector3.new(0, 0.5, 0)
+            end
+            a0.Parent, a1.Parent = part, part
+            effect.Attachment0, effect.Attachment1 = a0, a1
+            effect.Parent = part
+        elseif source.Parent:IsA("Attachment") then
+            local attachment = Instance.new("Attachment")
+            attachment.Name, attachment.CFrame, attachment.Parent = "EffectOrigin", source.Parent.CFrame, part
+            effect.Parent = attachment
+        else effect.Parent = part end
+        if preview then
+            effect.Enabled = false
+            if effect:IsA("ParticleEmitter") then effect.TimeScale = math.clamp(effect.TimeScale, 0, 1) end
+        end
+        return { Model = model, Carrier = part, Effect = effect }
+    end)
+    if not ok then model:Destroy(); error(result) end
+    return result
+end
+
+local function chooseVfx(object)
+    destroyVfxPreview()
+    vfxChoice = object
+    vfxMessage(object and object.Name or "Choose an effect", object and (object.ClassName .. "\n" .. object:GetFullName() .. "\nPlay creates a local rig in front of the camera. Original effects are unchanged.") or "Rescan and choose a VFX entry.")
+end
+
+local function scanVfx()
+    if vfxScanBusy then return end
+    vfxScanBusy = true
+    vfxMessage("Scanning VFX", "Finding loaded particles, beams, trails, fire, smoke, and sparkles...")
+    task.spawn(function()
+        local ok, objects = pcall(game.GetDescendants, game)
+        local values, entries, preserved = {}, {}, false
+        if ok then
+            for _, object in ipairs(objects) do
+                if vfxClasses[object.ClassName] and (not vfxPreview or not object:IsDescendantOf(vfxPreview.Model)) then
+                    if #values >= 2000 then break end
+                    local key = (#values + 1) .. " / " .. object.Name .. " [" .. object.ClassName .. "] / " .. object:GetFullName()
+                    values[#values + 1], entries[key] = key, object
+                    if object == vfxChoice then preserved = true end
+                end
+            end
+        end
+        vfxScanBusy = false
+        if not Session.Alive then return end
+        vfxEntries = entries
+        if not preserved then chooseVfx(nil) end
+        vfxDropdown:Refresh(#values > 0 and values or { "No loaded VFX found" })
+        vfxMessage(ok and "VFX scan complete" or "VFX scan failed", ok and (#values .. " effects found. Lists up to 2,000 entries. Choose an entry, then Play preview.") or tostring(objects))
+    end)
+end
+
+local function stopVfx(clear)
+    vfxPlaying = false
+    if not vfxPreview then return end
+    local effect = vfxPreview.Effect
+    effect.Enabled = false
+    if clear and (effect:IsA("ParticleEmitter") or effect:IsA("Trail")) then effect:Clear() end
+    if clear and (effect:IsA("Fire") or effect:IsA("Smoke") or effect:IsA("Sparkles")) then
+        local replacement = effect:Clone()
+        if replacement then
+            replacement.Enabled, replacement.Parent = false, effect.Parent
+            vfxPreview.Effect = replacement
+            effect:Destroy()
+        end
+    end
+    vfxMessage("VFX stopped", "Preview rig is kept. Play restarts it; Remove preview deletes the rig.")
+end
+
+local function burstVfx()
+    if not vfxPreview then return end
+    local effect = vfxPreview.Effect
+    if effect:IsA("ParticleEmitter") then effect:Emit(vfxBurst)
+    else effect.Enabled = true end
+end
+
+local function playVfx()
+    if not vfxChoice then vfxMessage("Choose an effect", "Rescan VFX and select an entry first."); return end
+    local ok, err = pcall(function()
+        if not vfxPreview then
+            vfxPreview = buildVfxRig(vfxChoice, true)
+            vfxPreview.Model.Name = "ParawareVFXPreview"
+            local camera = workspace.CurrentCamera
+            assert(camera, "Camera unavailable")
+            vfxPreview.Carrier.CFrame = camera.CFrame * CFrame.new(0, 0, -vfxDistance)
+            vfxPreview.Model.Parent = workspace
+        end
+        vfxElapsed, vfxBurstClock, vfxPlaying = 0, 0, true
+        local effect = vfxPreview.Effect
+        if effect:IsA("ParticleEmitter") then
+            effect:Clear()
+            effect.Enabled = false
+            burstVfx()
+        else effect.Enabled = true end
+        vfxMessage("VFX preview playing", vfxChoice.ClassName .. " / " .. (vfxLoop and "Loop on" or ("One shot: " .. vfxDuration .. " seconds")) .. "\nBeams use sample endpoints; trails move on a sample path. Large textures or scripts may affect the original appearance.")
+    end)
+    if not ok then destroyVfxPreview(); vfxMessage("VFX preview failed", tostring(err)) end
+end
+
+local function updateVfx(delta)
+    if not vfxPreview or not vfxPlaying then return end
+    if not vfxPreview.Model.Parent then destroyVfxPreview(); vfxMessage("Preview removed", "The preview rig was removed from the world. Play creates a new one."); return end
+    vfxElapsed, vfxBurstClock = vfxElapsed + delta, vfxBurstClock + delta
+    if not vfxLoop and vfxElapsed >= vfxDuration then stopVfx(true); return end
+    local camera = workspace.CurrentCamera
+    if camera then
+        local position = CFrame.new(0, 0, -vfxDistance)
+        if vfxPreview.Effect:IsA("Trail") then position = position * CFrame.new(math.sin(vfxElapsed * 2) * 2, math.cos(vfxElapsed * 2), 0) end
+        vfxPreview.Carrier.CFrame = camera.CFrame * position
+    end
+    if vfxLoop and vfxPreview.Effect:IsA("ParticleEmitter") and vfxBurstClock >= vfxInterval then
+        vfxBurstClock = 0
+        burstVfx()
+    end
 end
 
 local function build()
@@ -1037,6 +1201,31 @@ local function build()
         if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
         local copied = pcall(setclipboard, soundChoice.Id or soundChoice.Content)
         notify(copied and "Sound ID copied." or "Could not copy sound ID.")
+    end })
+    local vfx = assets:Section({ Title = "VFX export", Icon = "layers", Opened = false, Box = true })
+    vfx:Paragraph({ Title = "Preview and save effects", Desc = "Rescan finds loaded ParticleEmitters, Beams, Trails, Fire, Smoke, and Sparkles. Previews use cloned effects on a local rig in front of your camera. Original effects are unchanged; beam endpoints and trail motion use a sample setup." })
+    vfx:Button({ Title = "Rescan VFX", Icon = "refresh-cw", Callback = scanVfx })
+    vfxDropdown = vfx:Dropdown({ Title = "Effect", SearchBarEnabled = true, Values = { "Rescan to find effects" }, Value = "Rescan to find effects", Callback = function(value) chooseVfx(vfxEntries[value]) end })
+    vfxStatus = vfx:Paragraph({ Title = "Choose an effect", Desc = "Rescan and choose a VFX entry." })
+    vfx:Button({ Title = "Play preview", Icon = "play", Callback = playVfx })
+    vfx:Button({ Title = "Emit burst", Callback = function() if vfxPlaying then burstVfx() else playVfx() end end })
+    vfx:Button({ Title = "Stop and clear", Icon = "square", Callback = function() stopVfx(true) end })
+    vfx:Button({ Title = "Remove preview", Icon = "x", Callback = function() destroyVfxPreview(); vfxMessage("Preview removed", "Select an effect and Play to create it again.") end })
+    vfx:Toggle({ Title = "Loop preview", Value = false, Desc = "Repeat particle bursts at the selected interval, or keep other effects active. This only changes the preview.", Callback = function(value)
+        vfxLoop = value
+        if vfxPlaying then playVfx() end
+    end })
+    vfx:Slider({ Title = "Particles per burst", Step = 1, Value = { Min = 1, Max = 200, Default = vfxBurst }, Callback = function(value) vfxBurst = math.clamp(math.floor(tonumber(value) or 30), 1, 200) end })
+    vfx:Slider({ Title = "Loop interval", Desc = "Seconds between particle bursts", Step = 0.1, Value = { Min = 0.2, Max = 5, Default = vfxInterval }, Callback = function(value) vfxInterval = math.clamp(tonumber(value) or 1, 0.2, 5) end })
+    vfx:Slider({ Title = "One-shot duration", Desc = "Seconds before Stop and clear", Step = 0.5, Value = { Min = 0.5, Max = 20, Default = vfxDuration }, Callback = function(value) vfxDuration = math.clamp(tonumber(value) or 3, 0.5, 20) end })
+    vfx:Slider({ Title = "Preview distance", Desc = "Studs in front of the camera", Step = 1, Value = { Min = 4, Max = 40, Default = vfxDistance }, Callback = function(value) vfxDistance = math.clamp(tonumber(value) or 12, 4, 40) end })
+    vfx:Button({ Title = "Export VFX rig", Icon = "download", Desc = "Save a standalone .rbxm with a carrier and sample endpoints. Scripts and preview animation are excluded.", Callback = function() exportSelection("VFX") end })
+    vfx:Button({ Title = "Export original effect", Desc = "Preserve the selected effect's properties; its external attachments/parent geometry are not included.", Callback = function() exportSelection("VFX original") end })
+    vfx:Button({ Title = "Copy effect path", Icon = "copy", Callback = function()
+        if not vfxChoice or not vfxChoice.Parent then notify("Choose a loaded effect first."); return end
+        if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
+        local copied = pcall(setclipboard, vfxChoice:GetFullName())
+        notify(copied and "Effect path copied." or "Could not copy effect path.")
     end })
     exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Select models with the picker, or use Export whole game UI." })
     historyStatus = assets:Paragraph({ Title = "Recent exports", Desc = "No files saved this session." })
@@ -7513,6 +7702,7 @@ pickerHighlight.OutlineTransparency = 0.15
 pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
 pickerHighlight.Parent = workspace
 connect(RunService.RenderStepped, function(delta)
+    updateVfx(delta or 0)
     soundUpdateClock = soundUpdateClock + (delta or 0)
     if soundUpdateClock >= 0.25 then soundUpdateClock = 0; updateSoundTimeline() end
     if not pickerHighlight then return end
