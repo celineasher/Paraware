@@ -1,0 +1,16 @@
+{
+  "name": "paraware-checks",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Development checks for the Paraware Roblox client script",
+  "scripts": {
+    "build": "python3 tools/build.py",
+    "check:build": "python3 tools/build.py --check",
+    "test": "node tests/run.cjs"
+  },
+  "engines": { "node": ">=22" },
+  "devDependencies": {
+    "fengari": "0.1.5",
+    "luaparse": "0.3.1"
+  }
+}
