@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.3.0",
+    Version = "1.4.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -55,7 +55,7 @@ local state = {
     Fly = false, FlySpeed = 50, Altitude = "Level",
     InfiniteJump = false, Noclip = false,
     FovEnabled = false, Fov = 80, Fullbright = false,
-    Picker = false, PickMode = "Nearest model",
+    Picker = false, PickMode = "Nearest model", PickDistance = 5000, SkipInvisible = true,
 }
 local character, humanoid, root, baseline, flight
 local collisions, cameraDefaults = {}, {}
@@ -67,6 +67,8 @@ local pickerHighlight, exportStatus, exporter, exportBusy
 local exportCounter = 0
 local lastExportPath
 local selected, selectionHighlights = {}, {}
+local selectionStyle = { Fill = Color3.fromHex("#FF3B30"), Outline = Color3.fromHex("#FF3B30"), Opacity = 0.28 }
+local pickerTarget, lastHoverTarget
 local selectionSummary
 local selectedDropdown, selectedDetails, selectedEntries, selectionChoice, historyStatus
 local exportLayout, customFilename, cancelExport = "Together", "", false
@@ -456,6 +458,16 @@ clearSelection = function()
     refreshSelection()
 end
 
+local function updateSelectionStyle()
+    for _, highlight in pairs(selectionHighlights) do
+        highlight.FillColor, highlight.OutlineColor = selectionStyle.Fill, selectionStyle.Outline
+        highlight.FillTransparency, highlight.OutlineTransparency = 1 - selectionStyle.Opacity, 0.05
+    end
+    if pickerHighlight then
+        pickerHighlight.FillColor, pickerHighlight.OutlineColor = selectionStyle.Fill, selectionStyle.Outline
+    end
+end
+
 local function toggleSelection(target)
     if not target or not target.Parent or ownUI(target) then return end
     for i, object in ipairs(selected) do
@@ -472,8 +484,8 @@ local function toggleSelection(target)
     if target:IsA("Model") or target:IsA("BasePart") then
         local highlight = Instance.new("Highlight")
         highlight.Name, highlight.Adornee = "ParawareSelected", target
-        highlight.FillColor, highlight.OutlineColor = Color3.fromHex("#9BC9FF"), Color3.fromHex("#FFFFFF")
-        highlight.FillTransparency, highlight.OutlineTransparency = 0.8, 0.1
+        highlight.FillColor, highlight.OutlineColor = selectionStyle.Fill, selectionStyle.Outline
+        highlight.FillTransparency, highlight.OutlineTransparency = 1 - selectionStyle.Opacity, 0.05
         highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.Occluded, workspace
         selectionHighlights[target] = highlight
 
@@ -500,12 +512,30 @@ local function pickObject(position)
     local ray = camera:ViewportPointToRay(position.X - inset.X, position.Y - inset.Y)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = Player.Character and { Player.Character } or {}
-    local hit = workspace:Raycast(ray.Origin, ray.Direction * 2000, params)
-    if not hit or hit.Instance:IsA("Terrain") then return nil end
-    local target = hit.Instance
+    local excluded = {}
+    if Player.Character then excluded[#excluded + 1] = Player.Character end
+    if vfxPreview and vfxPreview.Model then excluded[#excluded + 1] = vfxPreview.Model end
+    params.IgnoreWater = true
+    local target
+    -- Invisible trigger volumes often sit in front of the actual model.
+    for _ = 1, 16 do
+        params.FilterDescendantsInstances = excluded
+        local hit = workspace:Raycast(ray.Origin, ray.Direction * state.PickDistance, params)
+        if not hit or hit.Instance:IsA("Terrain") then return nil end
+        local part = hit.Instance
+        if not part:IsA("BasePart") then return nil end
+        local invisible = (part.Transparency or 0) >= 0.98 or (part.LocalTransparencyModifier or 0) >= 0.98
+        if state.SkipInvisible and invisible then excluded[#excluded + 1] = part else target = part; break end
+    end
+    if not target then return nil end
     if state.PickMode == "Nearest model" then
         target = target:FindFirstAncestorOfClass("Model") or target
+    elseif state.PickMode == "Outer model" then
+        local ancestor = target.Parent
+        while ancestor and ancestor ~= workspace do
+            if ancestor:IsA("Model") then target = ancestor end
+            ancestor = ancestor.Parent
+        end
     end
     return target
 end
@@ -1125,12 +1155,23 @@ local function build()
     assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models or parts. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
     toggle(assets, "Picker", "Object picker", "Click to add or remove a target. Selecting does not save a file.", function(value)
         state.Picker = value
+        lastHoverTarget = nil
+        if pickerTarget then pickerTarget:SetDesc(value and "Move the cursor over a loaded object to preview its target." or "Enable Object picker to preview the exact target before clicking.") end
         if not value and pickerHighlight then pickerHighlight.Adornee = nil end
         exportMessage(value and "Picker ready" or "Picker off", value and "Click targets outside the hub, then Export selected." or "Selection is kept. You can still export or clear it.")
         log("Object picker " .. tostring(value))
     end)
-    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Clicked part" }, Value = state.PickMode,
+    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Outer model", "Clicked part" }, Value = state.PickMode,
         Callback = function(value) state.PickMode = value end })
+    pickerTarget = assets:Paragraph({ Title = "Under cursor", Desc = "Enable Object picker to preview the exact target before clicking." })
+    local detection = assets:Section({ Title = "Picker detection", Icon = "scan", Opened = false, Box = true })
+    detection:Toggle({ Title = "Skip invisible parts", Desc = "Pick through invisible trigger volumes. Turn off to select those parts themselves.", Value = true, Callback = function(value) state.SkipInvisible = value end })
+    slider(detection, "Pick distance", "Maximum distance in studs. Only objects loaded on your client can be detected.", 100, 10000, 5000, function(value) state.PickDistance = value end)
+    detection:Paragraph({ Title = "Model selection", Desc = "Nearest model selects the closest model ancestor; Outer model includes nested models in the outer assembly; Clicked part selects only the hit part. Your character and the local VFX preview are ignored." })
+    local colors = assets:Section({ Title = "Selection appearance", Icon = "palette", Opened = false, Box = true })
+    colors:Colorpicker({ Title = "Selection fill", Value = selectionStyle.Fill, Callback = function(color) selectionStyle.Fill = color; updateSelectionStyle() end })
+    colors:Colorpicker({ Title = "Selection outline", Value = selectionStyle.Outline, Callback = function(color) selectionStyle.Outline = color; updateSelectionStyle() end })
+    slider(colors, "Fill opacity", "Updates every selected object immediately.", 0, 100, 28, function(value) selectionStyle.Opacity = value / 100; updateSelectionStyle() end)
     selectionSummary = assets:Paragraph({ Title = "Selected: 0", Desc = "Nothing selected. Click a target to add it; click it again to remove it." })
     selectedDropdown = assets:Dropdown({ Title = "Selected targets", Values = { "Nothing selected" }, Value = "Nothing selected", SearchBarEnabled = true, Callback = function(value)
         selectionChoice = selectedEntries and selectedEntries[value]
@@ -1155,7 +1196,7 @@ local function build()
         cancelExport = true
         exportMessage("Cancellation requested", "Waiting for the active serialization to return. Its pending write and remaining files will be skipped; already saved files are kept.")
     end })
-    assets:Button({ Title = "Clear selection", Icon = "x", Callback = function() clearSelection(); exportMessage("Selection cleared", "Select targets to start a new export.") end })
+    assets:Button({ Title = "Clear all", Desc = "Unselect every export target and remove its highlight. Saved files are kept.", Icon = "x", Callback = function() clearSelection(); if pickerHighlight then pickerHighlight.Adornee = nil end; exportMessage("Selection cleared", "Select targets to start a new export.") end })
     assets:Button({ Title = "Copy last export path", Icon = "copy", Callback = function()
         if not lastExportPath then notify("Export a selection first."); return end
         if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
@@ -1293,6 +1334,8 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.4.0", Date = "2026-10-04", Title = "Export selection improvements",
+      Changes = "Red selection fill and outline by default, with live color and opacity controls.\nAdded Clear all and a target-under-cursor preview.\nPicker skips invisible triggers and local VFX previews, with adjustable range and nested-model selection." },
     { Version = "1.3.0", Date = "2026-10-03", Title = "Smoother interface motion",
       Changes = "Added short, subtle tab entrance transitions and soft button hover/press outlines.\nAdded saved reduced-motion preference.\nTransitions cancel cleanly during rapid navigation and unload." },
     { Version = "1.2.0", Date = "2026-10-03", Title = "Interface sounds",
@@ -8504,8 +8547,8 @@ connect(Input.TouchTapInWorld, function(position, processed)
 end)
 pickerHighlight = Instance.new("Highlight")
 pickerHighlight.Name = "ParawareObjectPicker"
-pickerHighlight.FillColor = Color3.fromHex("#FFFFFF")
-pickerHighlight.OutlineColor = Color3.fromHex("#FFFFFF")
+pickerHighlight.FillColor = selectionStyle.Fill
+pickerHighlight.OutlineColor = selectionStyle.Outline
 pickerHighlight.FillTransparency = 0.85
 pickerHighlight.OutlineTransparency = 0.15
 pickerHighlight.DepthMode = Enum.HighlightDepthMode.Occluded
@@ -8520,6 +8563,11 @@ connect(RunService.RenderStepped, function(delta)
         pickerHighlight.Adornee = pickObject(Input:GetMouseLocation())
     else
         pickerHighlight.Adornee = nil
+    end
+    local target = pickerHighlight.Adornee
+    if target ~= lastHoverTarget and pickerTarget then
+        lastHoverTarget = target
+        pickerTarget:SetDesc(target and (target:GetFullName() .. "\n" .. target.ClassName .. " · Click to select or unselect") or (state.Picker and "No selectable loaded object under the cursor." or "Enable Object picker to preview the exact target before clicking."))
     end
 end)
 connect(Input.JumpRequest, function()
