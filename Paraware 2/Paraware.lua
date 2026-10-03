@@ -989,8 +989,8 @@ local function build()
     local height = viewport and math.clamp(viewport.Y - 64, 300, 600) or 600
     local sidebarWidth = width < 680 and 125 or 180
     Window = WindUI:CreateWindow({
-        Title = "Paraware", Author = "Glass edition", Icon = logo,
-        IconSize = 24, IconThemed = false, IconRadius = 6,
+        Title = "Paraware", Icon = logo,
+        IconSize = 32, IconThemed = false, IconRadius = 6,
         Theme = "Paraware", Folder = "Paraware", Size = UDim2.fromOffset(width, height),
         MinSize = Vector2.new(math.min(width, 520), 300), MaxSize = Vector2.new(1120, 800),
         SideBarWidth = sidebarWidth, Radius = 18, ElementsRadius = 10, NewElements = false,
