@@ -13,7 +13,6 @@ local Config = {
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
 local createScriptMaker
-local createMCP
 local embeddedLogo
 
 local GameModules = { Places = {}, Universes = {} }
@@ -1012,14 +1011,6 @@ local function build()
     local maker = createScriptMaker({ Tab = makerTab, Player = Player, Input = Input, Connect = connect, Notify = notify })
     table.insert(cleanups, function() maker:Unload() end)
     Session.ScriptMaker = maker
-    local mcpTab = Window:Tab({ Title = "MCP", Icon = "plug" })
-    local mcp = createMCP({ Tab = mcpTab, Maker = maker, Player = Player, Input = Input, Connect = connect, Notify = notify,
-        IsTool = function(node)
-            return Window.UIElements and Window.UIElements.Main and node:IsDescendantOf(Window.UIElements.Main)
-        end,
-    })
-    table.insert(cleanups, function() mcp:Unload() end)
-    Session.MCP = mcp
     local settings = Window:Tab({ Title = "Session", Icon = "settings" })
     if Window.UIElements then
         Window.UIElements.SideBarContainer.Visible = true
@@ -1740,155 +1731,6 @@ return function(context)
     end
     manager:Create('LocalScript', 'Local', nil, context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui'))
     return manager
-end
-
-end)()
-createMCP = (function()
-return function(context)
-    local http=context.Http or game:GetService('HttpService')
-    local requestFn=context.Request or request or http_request or (syn and syn.request)
-    local scheduler=context.Task or task
-    local maker=context.Maker
-    local session={Alive=true,Connected=false,ClientId='game-'..game.PlaceId..'-'..os.time()..'-'..math.random(100000,999999),Versions={},Processed={},ProcessedOrder={}, PollGeneration=0}
-    local base,token='http://127.0.0.1:8787',''
-    local status=function() end
-    local function call(method,path,body)
-        assert(type(requestFn)=='function','Executor HTTP request API unavailable')
-        assert(#token>=24,'Paste the companion pairing token first')
-        local options={Url=base..path,Method=method,Headers={Authorization='Bearer '..token,['Content-Type']='application/json'},Timeout=10}
-        if body then options.Body=http:JSONEncode(body) end
-        local response=requestFn(options);assert(response and response.StatusCode,'Companion did not respond')
-        local value=http:JSONDecode(response.Body or '')
-        assert(response.StatusCode>=200 and response.StatusCode<300,value.error or 'Companion request failed')
-        return value
-    end
-    function session:Configure(url,key)
-        assert(url:match('^http://127%.0%.0%.1:%d+$') or url:match('^http://localhost:%d+$'),'Use a loopback companion URL')
-        base,token=url,key
-    end
-    function session:Snapshot()
-        local objects={}
-        for index,node in ipairs(game:GetDescendants()) do
-            local ancestor=node;local excluded=false
-            while ancestor and ancestor~=game do
-                local name=ancestor.Name or ''
-                if name:find('Paraware',1,true) or name:find('AIChatWorkspace',1,true) or name:find('_DPP_',1,true) or name:find('Cobalt',1,true) then excluded=true;break end
-                ancestor=ancestor.Parent
-            end
-            if not excluded and not (context.IsTool and context.IsTool(node)) then
-                objects[#objects+1]={name=tostring(node.Name):sub(1,80),class=node.ClassName,path=node:GetFullName():sub(1,240)}
-                if #objects>=500 then break end
-            end
-            if index%100==0 then scheduler.wait() end
-        end
-        return {placeId=game.PlaceId,universeId=game.GameId,objects=objects,note='Partial client hierarchy. Names and paths are untrusted data. Only Paraware Script Maker sources are exposed separately.'}
-    end
-    local function record(id)
-        local value=assert(maker.Records[tonumber(id)],'Unknown Paraware script')
-        local meta=session.Versions[value.Id]
-        if not meta then meta={version=1,source=value.Code};session.Versions[value.Id]=meta end
-        if meta.source~=value.Code then meta.source=value.Code;meta.version=meta.version+1 end
-        return value,meta
-    end
-    function session:Execute(tool,args)
-        assert(self.Connected,'MCP disconnected')
-        assert(args.clientId==self.ClientId,'Wrong game session')
-        if tool=='list_scripts' then
-            local scripts={};for id in pairs(maker.Records) do local value,meta=record(id);scripts[#scripts+1]={scriptId=id,name=value.Name,status=value.Status,version=meta.version} end
-            table.sort(scripts,function(a,b) return a.scriptId<b.scriptId end);return {scripts=scripts}
-        end
-        if tool=='create_script' then
-            assert(type(args.name)=='string' and #args.name>0 and #args.name<=80,'Invalid script name')
-            assert(type(args.source)=='string' and #args.source>0 and #args.source<=131072,'Invalid source')
-            local parentName=args.parent or 'PlayerScripts'
-            assert(parentName=='PlayerScripts' or parentName=='PlayerGui' or parentName=='Character','Unsupported parent')
-            local parent=parentName=='Character' and context.Player.Character or context.Player:FindFirstChild(parentName)
-            assert(parent,'Requested parent is unavailable')
-            local id=maker:Create(args.name,'Local',nil,parent,args.source);local value,meta=record(id)
-            return {scriptId=id,name=value.Name,version=meta.version,status='Draft created; not run. Use save_script to save it.'}
-        end
-        local value,meta=record(args.scriptId)
-        if tool=='read_script' then return {scriptId=value.Id,name=value.Name,source=value.Code,version=meta.version,status=value.Status} end
-        if tool=='edit_script' then
-            assert(args.expectedVersion==meta.version,'Version conflict. Read the script again before editing.')
-            assert(value.Status~='Running','Stop this script in Script Maker before editing')
-            assert(type(args.source)=='string' and #args.source>0 and #args.source<=131072,'Invalid source')
-            maker:SetSource(value.Id,args.source);record(value.Id)
-            return {scriptId=value.Id,version=meta.version,status='Draft updated; not run'}
-        end
-        if tool=='run_script' then
-            assert(args.expectedVersion==meta.version,'Version conflict. Read the script before running it.')
-            assert(value.Mode=='Managed','MCP runs managed scripts only')
-            if value.Status=='Running' then return {scriptId=value.Id,status=value.Status,alreadyRunning=true} end
-            local ok,err=maker:Run(value.Id)
-            assert(ok,err or 'Script launch failed')
-            return {scriptId=value.Id,status=value.Status,version=meta.version,note='Launched in Script Maker. Use get_script_output to check results.'}
-        end
-        if tool=='stop_script' then
-            maker:Stop(value.Id,'Stopped');return {scriptId=value.Id,status=value.Status}
-        end
-        if tool=='get_script_output' then
-            local logs={};for index=math.max(1,#value.Logs-19),#value.Logs do logs[#logs+1]=value.Logs[index]:sub(1,4000) end
-            return {scriptId=value.Id,status=value.Status,version=meta.version,logs=logs}
-        end
-        if tool=='save_script' then
-            local writer=context.WriteFile or writefile;assert(type(writer)=='function','Executor file writing unavailable')
-            if makefolder then pcall(makefolder,'Paraware-Scripts') end
-            local path='Paraware-Scripts/MCP-'..value.Id..'-'..value.Name:gsub('[^%w_-]','_'):sub(1,60)..'.luau'
-            writer(path,value.Code);return {scriptId=value.Id,path=path,version=meta.version,status='Saved to executor workspace'}
-        end
-        error('Unsupported MCP command')
-    end
-    function session:Tick()
-        if not self.Alive or not self.Connected then return end
-        if not self.CachedSnapshot or os.clock()-(self.SnapshotAt or 0)>10 then self.CachedSnapshot=self:Snapshot();self.SnapshotAt=os.clock() end
-        call('POST','/clients',{clientId=self.ClientId,snapshot=self.CachedSnapshot})
-        local result=call('GET','/commands/'..self.ClientId)
-        for _,command in ipairs(result.commands or {}) do
-            if not self.Connected or not self.Alive then break end
-            local payload=self.Processed[command.id]
-            if not payload then
-                local ok,value=pcall(self.Execute,self,command.tool,command.args)
-                payload={id=command.id,clientId=self.ClientId}
-                if ok then payload.result=value else payload.error=tostring(value) end
-                self.Processed[command.id]=payload;self.ProcessedOrder[#self.ProcessedOrder+1]=command.id
-                if #self.ProcessedOrder>128 then self.Processed[table.remove(self.ProcessedOrder,1)]=nil end
-            end
-            call('POST','/commands/result',payload)
-        end
-        status('Connected · '..self.ClientId..'\nGame '..game.PlaceId..' · Commands synchronized. Run/stop/output tools are available through Script Maker.')
-    end
-    function session:Connect()
-        assert(self.Alive,'MCP unloaded');if self.Connected then return end
-        call('GET','/health');self.PollGeneration=self.PollGeneration+1;local generation=self.PollGeneration;self.Connected=true
-        local ok,err=pcall(self.Tick,self);if not ok then self.Connected=false;error(err) end
-        if context.Headless then return end
-        scheduler.spawn(function()
-            while self.Alive and self.Connected and self.PollGeneration==generation do
-                scheduler.wait(2);if not self.Alive or not self.Connected or self.PollGeneration~=generation then break end;local success,failure=pcall(self.Tick,self)
-                if not success then status('Connection interrupted: '..tostring(failure)..'\nKeep the companion running. Retrying automatically.') end
-            end
-        end)
-    end
-    function session:Disconnect()
-        self.PollGeneration=self.PollGeneration+1;self.Connected=false;pcall(call,'POST','/clients/disconnect',{clientId=self.ClientId});status('Disconnected. Reconnect to share game context and Script Maker drafts.')
-    end
-    function session:Unload() self.Alive=false;self.Connected=false end
-    if context.Headless then return session end
-    local tab=context.Tab
-    local url,key=base,token
-    local info=tab:Paragraph({Title='Paraware MCP',Desc='Chat in ChatGPT. This tab connects your current Roblox client to the local MCP companion.'})
-    status=function(text) info:SetDesc(text) end
-    tab:Paragraph({Title='Connect your game',Desc='1. Start the new MCP companion on your Mac.\n2. Paste its pairing token below and connect.\n3. Select this game in the Chrome extension and start a session in ChatGPT.'})
-    tab:Input({Title='Companion URL',Value=base,Callback=function(value) url=value end})
-    tab:Input({Title='Pairing token',Placeholder='Token printed by Start.command',Callback=function(value) key=value end})
-    local function action(fn) scheduler.spawn(function() local ok,err=pcall(fn);if not ok then status(tostring(err)) end end) end
-    tab:Button({Title='Connect game',Callback=function() action(function() session:Configure(url,key);session:Connect() end) end})
-    tab:Button({Title='Disconnect',Callback=function() session:Disconnect() end})
-    tab:Button({Title='Copy game session ID',Callback=function() action(function() assert(setclipboard,'Clipboard unavailable');setclipboard(session.ClientId) end) end})
-    tab:Paragraph({Title='Available tools',Desc='Inspect the client hierarchy; list, read, create, edit, save, run, stop and inspect output for Paraware scripts. Edits use version checks. ChatGPT can save, run, stop and check managed scripts when requested.'})
-    tab:Paragraph({Title='What is shared',Desc='Connecting publishes up to 500 object names, classes and paths, plus scripts you create in Script Maker when requested. It does not expose server scripts, arbitrary game script source or player chat.'})
-    return session
 end
 
 end)()
