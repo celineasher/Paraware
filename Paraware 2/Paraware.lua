@@ -1285,7 +1285,7 @@ end
 
 createScriptMaker = (function()
 return function(context)
-    local manager = { Records = {}, Selected = nil, Alive = true, NextId = 0 }
+    local manager = { Records = {}, Selected = nil, Alive = true, NextId = 0, ClientLogs = {} }
     local changed = function() end
     local scheduler = context.Task or task
     local compiler = context.Compile or loadstring
@@ -1293,7 +1293,7 @@ return function(context)
     local function output(record, level, ...)
         local parts = {}
         for i = 1, select('#', ...) do parts[i] = tostring(select(i, ...)) end
-        table.insert(record.Logs, level .. ' | ' .. table.concat(parts, '\t'))
+        table.insert(record.Logs, level .. ' | ' .. table.concat(parts, '\t'):sub(1,4000))
         if #record.Logs > 200 then table.remove(record.Logs, 1) end
         changed()
     end
@@ -1307,6 +1307,7 @@ return function(context)
     end
     function manager:Stop(id, status)
         local record = assert(self.Records[id], 'Unknown script')
+        if record.ExternalActive then output(record, 'warning', 'Only the launch task is stopped. External hooks, tasks and UI may still be active; use the script own unload control.') end
         record.Generation = record.Generation + 1
         record.Status = status or 'Disabled'
         for _, child in pairs(self.Records) do
@@ -1340,7 +1341,7 @@ return function(context)
         instance.Parent = parent or context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui')
         local record = { Id = self.NextId, Name = instance.Name, Role = role or 'Local', Owner = owner,
             Instance = instance, Code = source or 'print("Hello from Paraware")\n', Status = 'Ready',
-            Generation = 0, Threads = {}, Connections = {}, Cleanups = {}, Logs = {} }
+            Mode = 'Managed', Generation = 0, Threads = {}, Connections = {}, Cleanups = {}, Logs = {} }
         self.Records[record.Id] = record
         self.Selected = record.Id
         changed()
@@ -1357,11 +1358,49 @@ return function(context)
         changed()
         return fn, err
     end
+    function manager:SetMode(id, mode)
+        local record = assert(self.Records[id], 'Unknown script')
+        assert(mode == 'Managed' or mode == 'Executor compatibility', 'Unknown execution mode')
+        assert(record.Role ~= 'Controller' or mode == 'Managed', 'Controllers require Managed mode')
+        assert(not record.ExternalActive, 'Unload the external script before changing modes')
+        self:Stop(id, 'Ready'); record.Mode = mode; changed()
+    end
+    function manager:Capabilities()
+        local base = getgenv and getgenv() or (getfenv and getfenv(0) or _G)
+        local rows = {}
+        for _, name in ipairs({'loadstring','setfenv','getgenv','hookmetamethod','hookfunction','newcclosure','getnamecallmethod','checkcaller','getrawmetatable','getconnections','gethui','request','writefile'}) do
+            local value = base[name] or _G[name]
+            rows[#rows+1] = name .. ': ' .. (type(value)=='function' and 'available' or 'missing')
+        end
+        return table.concat(rows, '\n') .. '\nPresence check only; no hooks or remotes are called.'
+    end
     function manager:Run(id)
         assert(self.Alive, 'Script Maker is unloaded')
         local record = assert(self.Records[id], 'Unknown script')
         local fn, err = self:Check(id)
         if not fn then output(record, 'syntax error', err); return false, err end
+        if record.Mode == 'Executor compatibility' then
+            if record.ExternalActive then
+                output(record, 'warning', 'Duplicate launch blocked. Use the external script unload, then mark it unloaded.'); return false
+            end
+            self:Stop(id, 'Launching')
+            record.Status, record.ExternalActive = 'Launching', true
+            local generation = record.Generation
+            local thread
+            thread = coroutine.create(function()
+                local ok, message = xpcall(fn, function(e)
+                    return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e)
+                end)
+                record.Threads[thread] = nil
+                if self.Alive and generation == record.Generation then
+                    record.Status = ok and 'Launched (external lifecycle)' or 'Error (external effects possible)'
+                    output(record, ok and 'launch' or 'error', ok and 'Loader returned. Use Client output and the script own unload controls.' or message)
+                end
+            end)
+            record.Threads[thread] = true
+            output(record, 'launch', 'Using the executor original environment and native task/loadstring APIs.')
+            scheduler.spawn(thread); changed(); return true
+        end
         if not bindEnv then
             err = 'This executor does not support per-script environments (setfenv).'
             output(record, 'error', err); return false, err
@@ -1425,14 +1464,22 @@ return function(context)
         local environment = setmetatable({ script = record.Instance, scriptHub = api,
             print = function(...) output(record, 'output', ...) end,
             warn = function(...) output(record, 'warning', ...) end,
-            task = {
+            task = setmetatable({
                 spawn = function(cb, ...) return launch('spawn', nil, cb, ...) end,
                 defer = function(cb, ...) return launch('defer', nil, cb, ...) end,
                 delay = function(seconds, cb, ...) return launch('delay', seconds, cb, ...) end,
                 wait = function(seconds) local elapsed = scheduler.wait(seconds); if not active() then error('Managed script stopped', 0) end; return elapsed end,
                 cancel = function(thread) assert(record.Threads[thread], 'Task does not belong to this script'); scheduler.cancel(thread); record.Threads[thread] = nil end,
-            },
+            }, { __index = scheduler }),
         }, { __index = getfenv and getfenv(0) or _G })
+        environment.loadstring = function(source, name)
+            local nested, compileError = compiler(source, name)
+            if nested then
+                local ok, bindingError = pcall(bindEnv, nested, environment)
+                if not ok then return nil, tostring(bindingError) end
+            end
+            return nested, compileError
+        end
         local ok, bindError = pcall(bindEnv, fn, environment)
         if not ok then record.Status = 'Error'; output(record, 'error', bindError); return false, bindError end
         record.SourceWritable = pcall(function() record.Instance.Source = record.Code end)
@@ -1455,7 +1502,8 @@ return function(context)
     end
     if context.Headless then return manager end
     local tab = context.Tab
-    local current, editor, gutter, console, diagnostic, picker, ownerPicker
+    local current, editor, gutter, console, diagnostic, picker, ownerPicker, modePicker
+    local listCache, modeCache, selectionCache
     local selecting, syncing = false, false
     local location, customPath, chosenOwner = 'PlayerScripts', '', nil
     local function selected() return manager.Records[manager.Selected] end
@@ -1477,13 +1525,22 @@ return function(context)
         return assert(context.Player:FindFirstChild(location), location .. ' is unavailable')
     end
     local function label(record) return record.Id .. ' | ' .. record.Name end
-    tab:Paragraph({Title = 'Script Maker', Desc = 'Managed client scripts. Re-enable restarts from the beginning. Use scriptHub:Connect and task for cleanup. Native tight loops and untracked side effects cannot be stopped reliably.'})
+    tab:Paragraph({Title = 'Script Maker', Desc = 'Managed client scripts. Re-enable restarts from the beginning. Use scriptHub:Connect and task for cleanup. Choose Managed for cleanup/controllers or Executor compatibility for third-party loaders. Native crashes cannot be caught by this editor.'})
     picker = tab:Dropdown({Title = 'Open script', Values = {}, Callback = function(value)
         if selecting then return end
         local id = tonumber(tostring(value):match('^(%d+)'))
         if manager.Records[id] then manager.Selected = id; current = nil; changed() end
     end})
-    tab:Input({Title = 'Script name', Placeholder = 'LocalScript', Callback = function(value)
+    modePicker = tab:Dropdown({Title = 'Execution mode', Values = {'Managed','Executor compatibility'}, Value = 'Managed', Callback = function(value)
+        if selecting then return end
+        act(function() manager:SetMode(assert(manager.Selected, 'Select a script'), value) end)
+    end})
+    tab:Paragraph({Title = 'Compatibility mode', Desc = 'Uses normal executor APIs, globals and nested loaders. Disable/Kill stop only the launch task; external hooks, windows and background work require their own unload. Client output includes other game scripts.'})
+    tab:Button({Title = 'Check executor capabilities', Callback = function() context.Notify(manager:Capabilities()) end})
+    tab:Button({Title = 'Mark external script unloaded', Desc = 'Use its own unload control first. This only unlocks another run; it does not remove hooks or UI.', Callback = function()
+        act(function() local record = assert(selected(), 'Select a script'); manager:Stop(record.Id, 'Ready'); record.ExternalActive=false; changed() end)
+    end})
+    tab:Input({Title = 'Script name' , Placeholder = 'LocalScript', Callback = function(value)
         local record = selected(); if record and #value > 0 then record.Name = value:sub(1,80); record.Instance.Name = record.Name; changed() end
     end})
     tab:Dropdown({Title = 'Instance location', Values = {'PlayerScripts','PlayerGui','Character','Workspace','ReplicatedStorage','Custom path'}, Value = 'PlayerScripts', Callback = function(value) location = value end})
@@ -1494,6 +1551,17 @@ return function(context)
         manager:Create('Controller', 'Controller', chosenOwner, resolve(), 'local children = scriptHub:GetChildren()\nif #children == 0 then\n    children[1] = scriptHub:CreateChild({\n        Name = "Child",\n        Source = [[print("Child running")]],\n    })\nend\nfor _, id in ipairs(children) do\n    scriptHub:Enable(id)\nend\n-- scriptHub:Disable(id), :Kill(id), :Restart(id)\n')
     end) end})
     tab:Button({Title = 'Move selected script', Callback = function() act(function() local record = assert(selected(), 'Select a script'); manager:Stop(record.Id); record.Instance.Parent = resolve(); changed() end) end})
+    tab:Button({Title = 'New executor test', Desc = 'Paste a Roblox executor script or loadstring loader into this document.', Callback = function()
+        act(function()
+            local id = manager:Create('Executor test','Local',nil,resolve(), 'local Players = game:GetService("Players")\nprint("Running in Roblox", game.PlaceId, Players.LocalPlayer.Name)\n-- Paste a loader or script here.\n')
+            manager:SetMode(id, 'Executor compatibility')
+        end)
+    end})
+    tab:Button({Title = 'New remote event listener', Desc = 'Managed template observes loaded RemoteEvent client messages; does not intercept outgoing calls or invoke remotes.', Callback = function()
+        act(function()
+            manager:Create('Remote event listener','Local',nil,resolve(), 'local watched = {}\nlocal function watch(remote)\n    if not remote:IsA("RemoteEvent") or watched[remote] then return end\n    watched[remote] = true\n    scriptHub:Connect(remote.OnClientEvent, function(...)\n        print(remote:GetFullName(), ...)\n    end)\nend\nfor _, item in ipairs(game:GetDescendants()) do watch(item) end\nscriptHub:Connect(game.DescendantAdded, watch)\nprint("Listening for client remote events")\n')
+        end)
+    end})
     local function ui(class, properties, parent)
         local item = Instance.new(class); for key, value in pairs(properties) do item[key] = value end; item.Parent = parent; return item
     end
@@ -1549,18 +1617,42 @@ return function(context)
     else
         tab:Paragraph({Title='Editor unavailable', Desc='WindUI did not expose its tab container.'})
     end
+    local clientOutput = tab:Paragraph({Title='Client output (all scripts)', Desc='Enable monitoring to capture client output, warnings and errors. Messages cannot reliably be attributed to one compatibility script.'})
+    local clientConnection
+    tab:Toggle({Title='Monitor client output', Value=false, Callback=function(enabled)
+        if clientConnection then clientConnection:Disconnect(); clientConnection=nil end
+        if enabled then act(function()
+            clientConnection = context.Connect(game:GetService('LogService').MessageOut, function(message, kind)
+                if not manager.Alive then return end
+                local text = tostring(kind) .. ' | ' .. tostring(message):sub(1,4000)
+                table.insert(manager.ClientLogs,text); if #manager.ClientLogs>100 then table.remove(manager.ClientLogs,1) end
+                local tail = {}; for i=math.max(1,#manager.ClientLogs-7),#manager.ClientLogs do tail[#tail+1]=manager.ClientLogs[i] end
+                clientOutput:SetDesc(table.concat(tail,'\n'))
+            end)
+        end) end
+    end})
+    tab:Button({Title='Copy client output', Callback=function() act(function() assert(setclipboard,'Clipboard unsupported');setclipboard(table.concat(manager.ClientLogs,'\n')) end) end})
+    tab:Button({Title='Clear client output', Callback=function() manager.ClientLogs={};clientOutput:SetDesc('No client messages captured.') end})
     local status = tab:Paragraph({Title='Script status', Desc='Create a script to begin.'})
     changed = function()
         if not manager.Alive then return end
         local names, owners = {}, {'None'}
         for _, record in pairs(manager.Records) do names[#names+1]=label(record); if record.Role=='Controller' then owners[#owners+1]=label(record) end end
-        table.sort(names); selecting=true; picker:Refresh(names); ownerPicker:Refresh(owners); selecting=false
-        local record = selected(); if not record then return end
+        table.sort(names)
+        local key = table.concat(names, '\n') .. table.concat(owners, '\n')
+        selecting=true
+        if key ~= listCache then picker:Refresh(names); ownerPicker:Refresh(owners); listCache=key end
+        local record = selected()
+        if not record then selecting=false; if editor then syncing=true;editor.Text='';syncing=false end;if console then console.Text='Create a script to begin.' end;return end
+        if modeCache~=record.Mode or selectionCache~=record.Id then
+            modePicker:Select(record.Mode); picker:Select(label(record)); modeCache=record.Mode;selectionCache=record.Id
+        end
+        selecting=false
         if editor and current~=record.Id then syncing=true; editor.Text=record.Code; editor.CursorPosition=1; current=record.Id; syncing=false
             local lines={'1'}; for _ in record.Code:gmatch('\n') do lines[#lines+1]=tostring(#lines+1) end; gutter.Text=table.concat(lines,'\n')
         end
         local threads, connections = 0,0; for _ in pairs(record.Threads) do threads=threads+1 end; for c in pairs(record.Connections) do if c.Connected then connections=connections+1 end end
-        status:SetDesc(record.Name .. ' | ' .. record.Role .. ' | ' .. record.Status .. '\nTasks: ' .. threads .. ' | Connections: ' .. connections .. '\nOwner: ' .. tostring(record.Owner or 'None') .. '\nLocation: ' .. record.Instance:GetFullName() .. '\nExecution: executor-managed; engine LocalScript stays disabled.')
+        status:SetDesc(record.Name .. ' | ' .. record.Role .. ' | ' .. record.Status .. '\nTasks: ' .. threads .. ' | Connections: ' .. connections .. '\nOwner: ' .. tostring(record.Owner or 'None') .. '\nLocation: ' .. record.Instance:GetFullName() .. '\nExecution: ' .. record.Mode .. '; engine LocalScript stays disabled.')
         if diagnostic then diagnostic.Text=record.Diagnostic or ('No syntax errors | ' .. record.Status) end
         if console then local recent={}; for i=1,#record.Logs do recent[#recent+1]=record.Logs[i] end; console.Text=#recent>0 and table.concat(recent,'\n') or 'No output yet.' end
     end
