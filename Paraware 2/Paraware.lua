@@ -1,8 +1,10 @@
 -- Paraware Glass | WindUI universal hub
 -- Exporter: UniversalSynSaveInstance https://discord.gg/wx4ThpAsmw
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
--- Edit the registry below to add your own game modules. No game-specific modules ship here.
+-- Separate game modules are registered in games/registry.json.
 local Config = {
+    Version = "1.1.0",
+    GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
     ToggleKey = Enum.KeyCode.RightShift,
@@ -12,6 +14,8 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local createHubExtras
+local preferences
 local createScriptMaker
 local embeddedLogo
 
@@ -989,12 +993,12 @@ local function build()
     local height = viewport and math.clamp(viewport.Y - 64, 300, 600) or 600
     local sidebarWidth = width < 680 and 125 or 180
     Window = WindUI:CreateWindow({
-        Title = "Paraware", Icon = logo,
+        Title = "Paraware", Author = "by Paradox", Icon = logo,
         IconSize = 40, IconThemed = false, IconRadius = 6,
         Theme = "Paraware", Folder = "Paraware", Size = UDim2.fromOffset(width, height),
         MinSize = Vector2.new(math.min(width, 520), 300), MaxSize = Vector2.new(1120, 800),
         SideBarWidth = sidebarWidth, Radius = 18, ElementsRadius = 10, NewElements = false,
-        Transparent = true, Acrylic = true, AutoScale = false, HideSearchBar = true,
+        Transparent = preferences.Glass, Acrylic = preferences.Blur, AutoScale = false, HideSearchBar = true,
         HidePanelBackground = false,
         ToggleKey = Config.ToggleKey, Topbar = { Height = 50, ButtonsType = "Default" },
         OpenButton = {
@@ -1004,6 +1008,7 @@ local function build()
         },
     })
     Window:OnDestroy(cleanup)
+    createHubExtras.DecorateHeader(Window, Config.Version, connect)
 
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
@@ -1252,7 +1257,7 @@ local function build()
         local ok = pcall(setclipboard, table.concat(logs, "\n"))
         notify(ok and "Log copied." or "Could not copy the log.")
     end })
-    settings:Paragraph({ Title = "Shortcuts", Desc = "Right Shift: show/hide\nF: toggle fly\n" .. logoStatus })
+    settings:Paragraph({ Title = "Shortcuts", Desc = "Show/hide and flight keys can be changed in Settings.\n" .. logoStatus })
     settings:Button({ Title = "Copy game IDs", Callback = function()
         if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
         local ok = pcall(setclipboard, "PlaceId = " .. game.PlaceId .. "\nGameId = " .. game.GameId)
@@ -1260,29 +1265,216 @@ local function build()
     end })
     settings:Button({ Title = "Restore all controls", Callback = function() reset(); notify("All controls restored.") end })
     settings:Button({ Title = "Unload Paraware", Desc = "Restore values, stop flight, and disconnect the hub.", Callback = Session.Unload })
-    if detected then
-        local gameTab = home:Section({ Title = detected.Name or "Game module", Opened = false, Box = true })
-        gameTab:Paragraph({ Title = detected.Name or "Detected module", Desc = "This module was selected by the current place or universe ID." })
-        local ok, err = pcall(detected.Build, {
-            Window = Window, WindUI = WindUI, Tab = gameTab, Player = Player, Log = log,
-            Connect = connect, OnCleanup = function(fn) assert(type(fn) == "function"); table.insert(cleanups, fn) end,
-            PlaceId = game.PlaceId, UniverseId = game.GameId,
-        })
-        if not ok then
-            gameTab:Paragraph({ Title = "Module failed", Desc = "Universal controls remain available. Check Console for details." })
-            log("Module error: " .. tostring(err))
-        end
-    end
+    createHubExtras.Build({ Window = Window, WindUI = WindUI, Config = Config,
+        Preferences = preferences, Session = Session, Player = Player, Notify = notify, Log = log,
+        Connect = connect, OnCleanup = function(fn) table.insert(cleanups, fn) end,
+        LocalModule = detected, OnGame = function(name)
+            gameInfo:SetDesc("Place: " .. game.PlaceId .. "\nUniverse: " .. game.GameId .. "\nModule: " .. name)
+        end,
+    })
     home:Select()
     task.spawn(function()
         local ok, info = pcall(Marketplace.GetProductInfo, Marketplace, game.PlaceId)
         if not Session.Alive then return end
         gameInfo:SetTitle(ok and info.Name or ("Place " .. game.PlaceId))
-        gameInfo:SetDesc("Place: " .. game.PlaceId .. "\nUniverse: " .. game.GameId .. "\nModule: " .. (detected and (detected.Name or "Registered module") or "Universal") .. (ok and "" or "\nGame name unavailable; detection uses IDs."))
+        gameInfo:SetDesc("Place: " .. game.PlaceId .. "\nUniverse: " .. game.GameId .. "\nModule: " .. (Session.GameModuleName or "Universal") .. (ok and "" or "\nGame name unavailable; detection uses IDs."))
         log(ok and ("Detected " .. info.Name) or "Game name lookup failed. ID detection remains available.")
     end)
 end
 
+createHubExtras = (function()
+local Extras = {}
+local settingsFile = "Paraware-settings.json"
+local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F" }
+local history = {
+    { Version = "1.1.0", Date = "2026-10-03", Title = "Settings and separate game modules",
+      Changes = "Added saved appearance and shortcut settings.\nAdded version history and the current version in the window header.\nSupported games get a dedicated tab from a separate GitHub script.\nPlace matching takes priority over universe matching; failed modules leave universal tools available." },
+    { Version = "1.0.0", Date = "2026-10-03", Title = "Standalone hub baseline",
+      Changes = "Controls, model/UI/sound/VFX export, Script Maker, and Session.\nRemoved AI Chat, MCP, and the companion extension from the active package." },
+}
+local function json()
+    return game:GetService("HttpService")
+end
+function Extras.LoadSettings()
+    local values = {}
+    for key, value in pairs(defaults) do values[key] = value end
+    if type(readfile) == "function" then
+        local ok, saved = pcall(function() return json():JSONDecode(readfile(settingsFile)) end)
+        if ok and type(saved) == "table" then
+            for key, value in pairs(defaults) do
+                if type(saved[key]) == type(value) then values[key] = saved[key] end
+            end
+        end
+    end
+    local valid = { RightShift = true, LeftAlt = true, F4 = true, F = true, G = true, H = true }
+    if not valid[values.ToggleKey] or values.ToggleKey == "F" or values.ToggleKey == "G" or values.ToggleKey == "H" then values.ToggleKey = defaults.ToggleKey end
+    if values.FlyKey ~= "F" and values.FlyKey ~= "G" and values.FlyKey ~= "H" then values.FlyKey = defaults.FlyKey end
+    return values
+end
+-- IDs are decimal strings in JSON so the registry stays readable and unambiguous.
+function Extras.Resolve(registry, placeId, universeId)
+    assert(type(registry) == "table" and registry.schemaVersion == 1, "Unsupported game registry schema")
+    local places, universes = registry.places or {}, registry.universes or {}
+    assert(type(places) == "table" and type(universes) == "table", "Invalid ID maps")
+    local entry = places[tostring(placeId)] or universes[tostring(universeId)]
+    if not entry then return nil end
+    assert(type(entry) == "table" and type(entry.name) == "string" and #entry.name > 0 and #entry.name <= 80, "Invalid game name")
+    assert(type(entry.file) == "string" and entry.file:match("^[%w_/-]+%.lua$") and not entry.file:find("..", 1, true) and entry.file:sub(1, 1) ~= "/", "Invalid game module path")
+    return entry
+end
+function Extras.DecorateHeader(window, version, connect)
+    local root = window.UIElements and window.UIElements.Main
+    local main = root and root:FindFirstChild("Main")
+    local topbar = main and main.FindFirstChild and main:FindFirstChild("Topbar")
+    if not topbar then return end
+    local left, right = topbar:FindFirstChild("Left"), topbar:FindFirstChild("Right")
+    local title = left and left:FindFirstChild("Title")
+    local layout = title and title:FindFirstChild("UIListLayout")
+    local author = title and title:FindFirstChild("Author")
+    local name = title and title:FindFirstChild("Title")
+    if layout then
+        layout.FillDirection = Enum.FillDirection.Horizontal
+        layout.VerticalAlignment = Enum.VerticalAlignment.Center
+        layout.Padding = UDim.new(0, 8)
+    end
+    if author then
+        author.Text = "by Paradox"
+        author.TextSize = 12
+        author.TextColor3 = Color3.fromHex("#C6C6CE")
+        author.TextTransparency = 0.15
+    end
+    if right then
+        local rightLayout = right:FindFirstChild("UIListLayout")
+        if rightLayout then rightLayout.VerticalAlignment = Enum.VerticalAlignment.Center end
+        local label = Instance.new("TextLabel")
+        label.Name = "ParawareVersion"
+        label.Text = "v" .. version
+        label.Font = Enum.Font.GothamMedium
+        label.TextSize = 12
+        label.TextColor3 = Color3.fromHex("#C6C6CE")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.fromOffset(48, 34)
+        label.TextXAlignment = Enum.TextXAlignment.Center
+        label.LayoutOrder = -100
+        label.Parent = right
+    end
+    local function reflow()
+        local compact = root.AbsoluteSize.X < 440
+        if author then author.Visible = not compact end
+        if name then name.TextSize = compact and 14 or 16 end
+    end
+    reflow()
+    connect(root:GetPropertyChangedSignal("AbsoluteSize"), reflow)
+end
+function Extras.Build(ctx)
+    local window, prefs = ctx.Window, ctx.Preferences
+    local settings = window:Tab({ Title = "Settings", Icon = "sliders-horizontal" })
+    local versions = window:Tab({ Title = "Version History", Icon = "history" })
+    versions:Paragraph({ Title = "Paraware " .. ctx.Config.Version, Desc = "Installed version. History below describes this package; it does not download updates." })
+    for index, entry in ipairs(history) do
+        local section = versions:Section({ Title = entry.Version .. " · " .. entry.Title, Opened = index == 1, Box = true })
+        section:Paragraph({ Title = entry.Date, Desc = entry.Changes })
+    end
+    local persistence = settings:Paragraph({ Title = "Preferences", Desc = "Appearance, shortcuts, and game detection. Movement and running scripts are never enabled by saved settings." })
+    local function save()
+        local ok, err = pcall(function()
+            assert(type(writefile) == "function", "File saving unavailable; preferences last for this session")
+            writefile(settingsFile, json():JSONEncode(prefs))
+        end)
+        persistence:SetDesc(ok and ("Saved to " .. settingsFile .. " in the executor workspace.") or tostring(err))
+    end
+    local appearance = settings:Section({ Title = "Appearance", Opened = true, Box = true })
+    appearance:Toggle({ Title = "Glass background", Value = prefs.Glass, Callback = function(value)
+        prefs.Glass = value; window:ToggleTransparency(value); save()
+    end })
+    appearance:Toggle({ Title = "Background blur", Desc = "Turn off for clearer gameplay or lower graphics overhead.", Value = prefs.Blur, Callback = function(value)
+        prefs.Blur = value; ctx.WindUI:ToggleAcrylic(value); save()
+    end })
+    local shortcuts = settings:Section({ Title = "Shortcuts", Opened = true, Box = true })
+    shortcuts:Dropdown({ Title = "Show / hide key", Values = { "RightShift", "LeftAlt", "F4" }, Value = prefs.ToggleKey, Callback = function(value)
+        if value ~= "RightShift" and value ~= "LeftAlt" and value ~= "F4" then return end
+        prefs.ToggleKey = value; ctx.Config.ToggleKey = Enum.KeyCode[value]; window:SetToggleKey(ctx.Config.ToggleKey); save()
+    end })
+    shortcuts:Dropdown({ Title = "Flight key", Values = { "F", "G", "H" }, Value = prefs.FlyKey, Callback = function(value)
+        if value ~= "F" and value ~= "G" and value ~= "H" then return end
+        prefs.FlyKey = value; ctx.Config.FlyKey = Enum.KeyCode[value]; save()
+    end })
+    local support = settings:Section({ Title = "Game support", Opened = true, Box = true })
+    support:Toggle({ Title = "Load supported game automatically", Desc = "Loads only the matching script from Paraware's game registry. Changes apply on the next launch; Check game support can load it now.", Value = prefs.AutoGame, Callback = function(value) prefs.AutoGame = value; save() end })
+    local status = support:Paragraph({ Title = "Game support", Desc = "No game module loaded. Universal tools remain available." })
+    local busy, mounted = false, false
+    local gameTab
+    local function mount(module)
+        assert(type(module) == "table" and type(module.Build) == "function", "Module must return a table with Build(context)")
+        local cleanup = {}
+        local function clear()
+            for i = #cleanup, 1, -1 do pcall(cleanup[i]) end
+            cleanup = {}
+        end
+        if not gameTab then
+            gameTab = window:Tab({ Title = module.Name or "Game", Icon = "gamepad-2" })
+            gameTab:Paragraph({ Title = module.Name or "Game module", Desc = "Matched to this game's place or universe ID." })
+        end
+        local ok, err = pcall(module.Build, {
+            Window = window, WindUI = ctx.WindUI, Tab = gameTab, Player = ctx.Player,
+            PlaceId = game.PlaceId, UniverseId = game.GameId, Log = ctx.Log, Notify = ctx.Notify,
+            Connect = function(signal, fn)
+                local connection = ctx.Connect(signal, fn)
+                cleanup[#cleanup + 1] = function() connection:Disconnect() end
+                return connection
+            end,
+            OnCleanup = function(fn) assert(type(fn) == "function"); cleanup[#cleanup + 1] = fn end,
+        })
+        -- A failed builder may already have added controls. Do not duplicate them by retrying it.
+        mounted = true
+        if not ok then
+            clear()
+            gameTab:Paragraph({ Title = "Module failed", Desc = "Universal tools remain available. Check the Session log. Relaunch after fixing the module." })
+            error(err)
+        end
+        ctx.OnCleanup(clear)
+        ctx.Session.GameModuleName = module.Name or "Game"
+        ctx.OnGame(ctx.Session.GameModuleName)
+        status:SetDesc("Loaded: " .. ctx.Session.GameModuleName .. ". Relaunch Paraware to use an updated game script.")
+    end
+    local function check()
+        if busy or not ctx.Session.Alive then return end
+        if mounted then ctx.Notify("Game module already attempted. Relaunch to reload it."); return end
+        busy = true
+        status:SetDesc("Checking support for place " .. game.PlaceId .. "…")
+        task.spawn(function()
+            local ok, err = pcall(function()
+                local module = ctx.LocalModule
+                if not module then
+                    local raw = game:HttpGet(ctx.Config.GameBaseUrl .. "registry.json", true)
+                    assert(#raw <= 262144, "Game registry exceeds size limit")
+                    if not ctx.Session.Alive then return end
+                    local entry = Extras.Resolve(json():JSONDecode(raw), game.PlaceId, game.GameId)
+                    if not entry then status:SetDesc("This game has no registered module. All universal tools are available."); return end
+                    status:SetDesc("Loading " .. entry.name .. "…")
+                    local source = game:HttpGet(ctx.Config.GameBaseUrl .. entry.file, true)
+                    assert(#source <= 1048576, "Game module exceeds size limit")
+                    if not ctx.Session.Alive then return end
+                    local chunk, compileError = loadstring(source, "ParawareGame/" .. entry.file)
+                    assert(type(chunk) == "function", compileError or "Game module failed to compile")
+                    module = chunk()
+                    assert(type(module) == "table", "Game module must return a table")
+                    module.Name = entry.name
+                end
+                if ctx.Session.Alive then mount(module) end
+            end)
+            busy = false
+            if not ctx.Session.Alive then return end
+            if not ok then status:SetDesc("Game support could not load. Universal tools still work. Check Session log; retry if the download failed."); ctx.Log("Game module error: " .. tostring(err)) end
+        end)
+    end
+    support:Button({ Title = "Check game support", Desc = "Retry the registry lookup without restarting the universal hub.", Callback = check })
+    settings:Button({ Title = "Save preferences", Callback = save })
+    if prefs.AutoGame or ctx.LocalModule then check() else status:SetDesc("Automatic game loading is off. Use Check game support to load a matching module.") end
+end
+return Extras
+
+end)()
 createScriptMaker = (function()
 return function(context)
     local manager = { Records = {}, Selected = nil, Alive = true, NextId = 0, ClientLogs = {} }
@@ -8115,6 +8307,9 @@ BAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECA
 BAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAGdrxgYAAAAcSURBVAECBAgQIECAAAECBAgQIECAAAECIwn8AEf6
 u+6vpl2xAAAAAElFTkSuQmCC
 ]]
+preferences = createHubExtras.LoadSettings()
+Config.ToggleKey = Enum.KeyCode[preferences.ToggleKey] or Config.ToggleKey
+Config.FlyKey = Enum.KeyCode[preferences.FlyKey] or Config.FlyKey
 local built, buildError = pcall(build)
 if not built then
     Session.Unload()
