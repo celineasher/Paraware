@@ -1504,6 +1504,8 @@ return function(context)
     local tab = context.Tab
     local current, editor, gutter, console, diagnostic, picker, ownerPicker, modePicker
     local listCache, modeCache, selectionCache
+    local workspaceFrame, editorPanel, scriptList, documentTitle, settingsButton, layoutWorkspace
+    local sidebarRows, sidebarCache = {}, nil
     local selecting, syncing = false, false
     local location, customPath, chosenOwner = 'PlayerScripts', '', nil
     local function selected() return manager.Records[manager.Selected] end
@@ -1570,17 +1572,31 @@ return function(context)
     if viewport then viewport.ClipsDescendants = true end
     if container then
         container.ClipsDescendants = true
-        local frame = ui('Frame', {Name='ParawareScriptEditor', ClipsDescendants=true, Size=UDim2.new(1,0,0,582), BackgroundColor3=Color3.fromRGB(10,10,12), BorderSizePixel=0}, container)
+        workspaceFrame = ui('Frame', {Name='ScriptWorkspace', ClipsDescendants=true, Size=UDim2.new(1,-12,1,-12), Position=UDim2.fromOffset(6,6), BackgroundColor3=Color3.fromRGB(18,18,22), BorderSizePixel=0}, viewport)
+        ui('UICorner', {CornerRadius=UDim.new(0,10)}, workspaceFrame)
+        ui('UIStroke', {Color=Color3.fromRGB(60,60,68), Thickness=1}, workspaceFrame)
+        documentTitle = ui('TextButton', {Name='SwitchDocument', Position=UDim2.fromOffset(14,8), Size=UDim2.new(1,-126,0,30), BackgroundTransparency=1, Text='Script workspace', TextColor3=Color3.fromRGB(236,236,242), Font=Enum.Font.GothamMedium, TextSize=14, TextXAlignment=Enum.TextXAlignment.Left, TextTruncate=Enum.TextTruncate.AtEnd}, workspaceFrame)
+        context.Connect(documentTitle.MouseButton1Click,function()
+            local ids={};for id in pairs(manager.Records) do ids[#ids+1]=id end;table.sort(ids)
+            for index,id in ipairs(ids) do if id==manager.Selected then manager.Selected=ids[index%#ids+1];current=nil;changed();return end end
+        end)
+        settingsButton = ui('TextButton', {Name='WorkspaceSettings', Position=UDim2.new(1,-106,0,8), Size=UDim2.fromOffset(92,30), BackgroundColor3=Color3.fromRGB(40,40,48), Text='Settings', TextColor3=Color3.fromRGB(230,230,238), Font=Enum.Font.GothamMedium, TextSize=13}, workspaceFrame)
+        ui('UICorner', {CornerRadius=UDim.new(0,6)}, settingsButton)
+        scriptList = ui('ScrollingFrame', {Name='ScriptDocuments', Position=UDim2.fromOffset(8,48), Size=UDim2.new(0,142,1,-56), ClipsDescendants=true, BackgroundColor3=Color3.fromRGB(23,23,29), BorderSizePixel=0, ScrollBarThickness=3, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, workspaceFrame)
+        local frame = ui('Frame', {Name='ParawareScriptEditor', ClipsDescendants=true, Position=UDim2.fromOffset(158,48), Size=UDim2.new(1,-166,1,-56), BackgroundColor3=Color3.fromRGB(12,12,16), BorderSizePixel=0}, workspaceFrame)
+        editorPanel = frame
         for index, action in ipairs({{'Run', function() manager:Run(manager.Selected) end}, {'Disable', function() manager:Stop(manager.Selected,'Disabled') end}, {'Kill', function() manager:Stop(manager.Selected,'Killed') end}}) do
             local callback = action[2]
-            local button = ui('TextButton', {Position=UDim2.new((index-1)/3,8,0,8), Size=UDim2.new(1/3,-16,0,30), BackgroundColor3=Color3.fromRGB(38,38,44), Text=action[1], TextColor3=Color3.fromRGB(240,240,245), Font=Enum.Font.Code, TextSize=13}, frame)
+            local button = ui('TextButton', {Position=UDim2.new((index-1)/3,8,0,8), Size=UDim2.new(1/3,-16,0,30), BackgroundColor3=index==1 and Color3.fromRGB(65,76,91) or Color3.fromRGB(38,38,44), Text=action[1], TextColor3=Color3.fromRGB(240,240,245), Font=Enum.Font.GothamMedium, TextSize=13}, frame)
+            ui('UICorner', {CornerRadius=UDim.new(0,6)}, button)
             context.Connect(button.MouseButton1Click, function() act(callback) end)
         end
-        diagnostic = ui('TextLabel', {Size=UDim2.new(1,-16,0,38), Position=UDim2.fromOffset(8,44), BackgroundTransparency=1, Text='Ready', TextColor3=Color3.fromRGB(220,220,225), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left}, frame)
-        local scroll = ui('ScrollingFrame', {ClipsDescendants=true, Size=UDim2.new(1,-16,0,320), Position=UDim2.fromOffset(8,86), BackgroundColor3=Color3.fromRGB(7,7,9), BorderSizePixel=0, ScrollBarThickness=5, AutomaticCanvasSize=Enum.AutomaticSize.XY, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        diagnostic = ui('TextLabel', {Size=UDim2.new(1,-16,0,28), Position=UDim2.fromOffset(8,44), ClipsDescendants=true, BackgroundTransparency=1, Text='Ready', TextColor3=Color3.fromRGB(220,220,225), Font=Enum.Font.Code, TextSize=12, TextWrapped=false, TextTruncate=Enum.TextTruncate.AtEnd, TextXAlignment=Enum.TextXAlignment.Left}, frame)
+        local scroll = ui('ScrollingFrame', {ClipsDescendants=true, Size=UDim2.new(1,-16,1,-204), Position=UDim2.fromOffset(8,76), BackgroundColor3=Color3.fromRGB(9,9,13), BorderSizePixel=0, ScrollBarThickness=5, AutomaticCanvasSize=Enum.AutomaticSize.XY, CanvasSize=UDim2.fromOffset(0,0)}, frame)
         gutter = ui('TextLabel', {Size=UDim2.fromOffset(42,320), BackgroundTransparency=1, Text='1', TextColor3=Color3.fromRGB(138,138,145), Font=Enum.Font.Code, TextSize=14, TextXAlignment=Enum.TextXAlignment.Right, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
-        editor = ui('TextBox', {Name='Source', Position=UDim2.fromOffset(52,0), Size=UDim2.new(1,-60,0,320), AutomaticSize=Enum.AutomaticSize.XY, BackgroundTransparency=1, Text='', TextColor3=Color3.fromRGB(235,235,240), Font=Enum.Font.Code, TextSize=14, MultiLine=true, ClearTextOnFocus=false, TextWrapped=false, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
-        local suggestions = ui('TextButton', {Position=UDim2.fromOffset(8,414), Size=UDim2.new(1,-16,0,30), BackgroundColor3=Color3.fromRGB(32,32,38), Text='Suggestions appear as you type', TextColor3=Color3.fromRGB(210,210,220), Font=Enum.Font.Code, TextSize=12}, frame)
+        editor = ui('TextBox', {Name='Source', Position=UDim2.fromOffset(52,6), Size=UDim2.new(1,-64,0,32), AutomaticSize=Enum.AutomaticSize.XY, BackgroundTransparency=1, Text='', TextColor3=Color3.fromRGB(235,235,240), Font=Enum.Font.Code, TextSize=15, MultiLine=true, ClearTextOnFocus=false, TextWrapped=false, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
+        gutter.Position = UDim2.fromOffset(0,6); gutter.TextSize=15
+        local suggestions = ui('TextButton', {Position=UDim2.new(0,8,1,-120), Size=UDim2.new(1,-16,0,24), BackgroundColor3=Color3.fromRGB(27,27,34), Text='Type to see suggestions', TextColor3=Color3.fromRGB(183,183,197), Font=Enum.Font.Code, TextSize=12, TextTruncate=Enum.TextTruncate.AtEnd}, frame)
         local candidates = {'local','function','return','script','scriptHub','print','warn','task.spawn','task.wait','task.delay','game:GetService','Instance.new','Vector3.new','CFrame.new','Enum','workspace','scriptHub:CreateChild','scriptHub:Enable','scriptHub:Disable','scriptHub:Kill','scriptHub:Connect','scriptHub:OnCleanup'}
         local completion, prefix = nil, ''
         local function updateCode()
@@ -1594,7 +1610,7 @@ return function(context)
             local before = cursor and cursor > 0 and editor.Text:sub(1,cursor-1) or ''
             prefix = before:match('([%w_:.]+)$') or ''; completion = nil
             if #prefix > 0 then for _, word in ipairs(candidates) do if word:sub(1,#prefix)==prefix and word~=prefix then completion=word; break end end end
-            suggestions.Text = completion and ('Insert suggestion: ' .. completion) or 'No suggestion (click or Tab to insert)'
+            suggestions.Text = completion and ('Insert suggestion: ' .. completion) or 'Ctrl+Enter to run | Tab accepts a suggestion'
             local code, id = record.Code, record.Id
             scheduler.delay(0.5, function()
                 if manager.Alive and manager.Selected==id and manager.Records[id].Code==code then manager:Check(id) end
@@ -1615,8 +1631,30 @@ return function(context)
             if key.KeyCode==Enum.KeyCode.Tab then accept() end
             if key.KeyCode==Enum.KeyCode.Return and (context.Input:IsKeyDown(Enum.KeyCode.LeftControl) or context.Input:IsKeyDown(Enum.KeyCode.RightControl)) then act(function() manager:Run(manager.Selected) end) end
         end)
-        local outputScroll = ui('ScrollingFrame', {ClipsDescendants=true, Position=UDim2.fromOffset(8,454), Size=UDim2.new(1,-16,0,118), BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, frame)
-        console = ui('TextLabel', {Size=UDim2.new(1,-8,0,118), AutomaticSize=Enum.AutomaticSize.Y, BackgroundTransparency=1, Text='No output yet.', TextColor3=Color3.fromRGB(210,210,218), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, outputScroll)
+        local outputTitle=ui('TextLabel', {Position=UDim2.new(0,10,1,-92), Size=UDim2.new(1,-20,0,18), BackgroundTransparency=1, Text='Output', TextColor3=Color3.fromRGB(214,214,225), Font=Enum.Font.GothamMedium, TextSize=12, TextXAlignment=Enum.TextXAlignment.Left}, frame)
+        local outputScroll = ui('ScrollingFrame', {ClipsDescendants=true, Position=UDim2.new(0,8,1,-70), Size=UDim2.new(1,-16,0,62), BackgroundColor3=Color3.fromRGB(19,19,25), BorderSizePixel=0, ScrollBarThickness=4, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        console = ui('TextLabel', {Position=UDim2.fromOffset(6,4), Size=UDim2.new(1,-16,0,54), AutomaticSize=Enum.AutomaticSize.Y, BackgroundTransparency=1, Text='Run a script to see its output.', TextColor3=Color3.fromRGB(210,210,218), Font=Enum.Font.Code, TextSize=13, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, outputScroll)
+        container.Parent=workspaceFrame;container.Position=UDim2.fromOffset(8,46);container.AnchorPoint=Vector2.new(0,0);container.Size=UDim2.new(1,-16,1,-54);container.Visible=false
+        local function toggleSettings()
+            container.Visible=not container.Visible; frame.Visible=not container.Visible;scriptList.Visible=not container.Visible
+            settingsButton.Text=container.Visible and 'Editor' or 'Settings'
+        end
+        context.Connect(settingsButton.MouseButton1Click,toggleSettings)
+        layoutWorkspace=function()
+            local size=viewport.AbsoluteSize or Vector2.new(700,500)
+            local narrow=size.X<540
+            local sidebar=narrow and 0 or 150
+            scriptList.Visible=not narrow and not container.Visible
+            frame.Position=UDim2.fromOffset(sidebar+8,48);frame.Size=UDim2.new(1,-sidebar-16,1,-56)
+            local height=math.max(100,size.Y-68)
+            local compact=height<280
+            outputScroll.Visible=not compact;outputTitle.Visible=not compact
+            suggestions.Position=UDim2.new(0,8,1,compact and -32 or -120)
+            local sourceHeight=math.max(24,height-(compact and 116 or 204))
+            scroll.Size=UDim2.new(1,-16,0,sourceHeight)
+        end
+        context.Connect(viewport:GetPropertyChangedSignal('AbsoluteSize'),layoutWorkspace)
+        layoutWorkspace()
     else
         tab:Paragraph({Title='Editor unavailable', Desc='WindUI did not expose its tab container.'})
     end
@@ -1643,6 +1681,17 @@ return function(context)
         for _, record in pairs(manager.Records) do names[#names+1]=label(record); if record.Role=='Controller' then owners[#owners+1]=label(record) end end
         table.sort(names)
         local key = table.concat(names, '\n') .. table.concat(owners, '\n')
+        if scriptList and sidebarCache~=key..tostring(manager.Selected) then
+            for _,row in ipairs(sidebarRows) do row:Destroy() end;sidebarRows={}
+            local function row(text,index,callback,active)
+                local button=ui('TextButton',{Position=UDim2.fromOffset(6,index*34+6),Size=UDim2.new(1,-12,0,30),BackgroundColor3=active and Color3.fromRGB(49,55,67) or Color3.fromRGB(29,29,36),Text=text,TextColor3=Color3.fromRGB(227,227,236),Font=Enum.Font.GothamMedium,TextSize=12,TextTruncate=Enum.TextTruncate.AtEnd},scriptList)
+                ui('UICorner',{CornerRadius=UDim.new(0,5)},button)
+                context.Connect(button.MouseButton1Click,function() act(callback) end);sidebarRows[#sidebarRows+1]=button
+            end
+            row('+ New script',0,function() manager:Create(nil,'Local',nil,context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui')) end)
+            for index,name in ipairs(names) do local id=tonumber(name:match('^(%d+)'));row(manager.Records[id].Name,index,function() manager.Selected=id;current=nil;changed() end,id==manager.Selected) end
+            sidebarCache=key..tostring(manager.Selected)
+        end
         selecting=true
         if key ~= listCache then picker:Refresh(names); ownerPicker:Refresh(owners); listCache=key end
         local record = selected()
@@ -1651,6 +1700,7 @@ return function(context)
             modePicker:Select(record.Mode); picker:Select(label(record)); modeCache=record.Mode;selectionCache=record.Id
         end
         selecting=false
+        if documentTitle then documentTitle.Text=record.Name .. '  /  ' .. (record.Mode=='Managed' and 'Managed' or 'Executor') .. '  (switch)' end
         if editor and current~=record.Id then syncing=true; editor.Text=record.Code; editor.CursorPosition=1; current=record.Id; syncing=false
             local lines={'1'}; for _ in record.Code:gmatch('\n') do lines[#lines+1]=tostring(#lines+1) end; gutter.Text=table.concat(lines,'\n')
         end
