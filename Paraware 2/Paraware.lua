@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.2.0",
+    Version = "1.3.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -1009,6 +1009,9 @@ local function build()
     })
     Window:OnDestroy(cleanup)
     createHubExtras.DecorateHeader(Window, Config.Version, connect)
+    Session.Motion = createHubExtras.CreateMotion({ Window = Window, Preferences = preferences,
+        Session = Session, Connect = connect,
+        OnCleanup = function(fn) table.insert(cleanups, fn) end })
     Session.Sounds = createHubExtras.CreateSounds({ Window = Window, Preferences = preferences,
         Session = Session, Connect = connect, Log = log,
         OnCleanup = function(fn) table.insert(cleanups, fn) end })
@@ -1288,8 +1291,10 @@ end
 createHubExtras = (function()
 local Extras = {}
 local settingsFile = "Paraware-settings.json"
-local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35 }
+local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.3.0", Date = "2026-10-03", Title = "Smoother interface motion",
+      Changes = "Added short, subtle tab entrance transitions and soft button hover/press outlines.\nAdded saved reduced-motion preference.\nTransitions cancel cleanly during rapid navigation and unload." },
     { Version = "1.2.0", Date = "2026-10-03", Title = "Interface sounds",
       Changes = "Added startup/reopen and button-click sounds.\nAdded saved sound toggle and volume, with a preview button.\nInterface sounds stay out of the sound exporter and stop on unload." },
     { Version = "1.1.0", Date = "2026-10-03", Title = "Settings and separate game modules",
@@ -1327,6 +1332,83 @@ function Extras.Resolve(registry, placeId, universeId)
     assert(type(entry) == "table" and type(entry.name) == "string" and #entry.name > 0 and #entry.name <= 80, "Invalid game name")
     assert(type(entry.file) == "string" and entry.file:match("^[%w_/-]+%.lua$") and not entry.file:find("..", 1, true) and entry.file:sub(1, 1) ~= "/", "Invalid game module path")
     return entry
+end
+function Extras.CreateMotion(ctx)
+    local motion = {}
+    local root = ctx.Window.UIElements and ctx.Window.UIElements.Main
+    local service = game:GetService("TweenService")
+    if not service or not root or not root.GetDescendants then
+        function motion:Update() end
+        return motion
+    end
+    local active, strokes, positions = {}, {}, {}
+    local bound = setmetatable({}, { __mode = "k" })
+    local function cancel(object)
+        if active[object] then active[object]:Cancel(); active[object] = nil end
+    end
+    local function tween(object, duration, properties)
+        cancel(object)
+        local animation = service:Create(object,
+            TweenInfo.new(ctx.Preferences.ReducedMotion and 0 or duration, Enum.EasingStyle.Quart, Enum.EasingDirection.Out), properties)
+        active[object] = animation
+        animation:Play()
+    end
+    local function entrance(container)
+        task.defer(function()
+            if not ctx.Session.Alive or not container.Parent or not container.Visible then return end
+            local target = positions[container]
+            cancel(container)
+            container.AnchorPoint = Vector2.new(0, 0)
+            if not ctx.Preferences.ReducedMotion then
+                container.Position = UDim2.new(target.X.Scale, target.X.Offset, target.Y.Scale, target.Y.Offset + 6)
+            end
+            tween(container, 0.18, { Position = target, AnchorPoint = Vector2.new(0, 0) })
+        end)
+    end
+    local mainBar = ctx.Window.UIElements.MainBar
+    local function bind(object)
+        if bound[object] then return end
+        if object:IsA("GuiButton") then
+            bound[object] = true
+            local stroke = Instance.new("UIStroke")
+            stroke.Name = "ParawareMotionOutline"
+            stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            stroke.Color = Color3.fromHex("#DADAE0")
+            stroke.Thickness, stroke.Transparency = 1, 1
+            stroke.Parent = object
+            strokes[#strokes + 1] = stroke
+            local hovered = false
+            ctx.Connect(object.MouseEnter, function() hovered = true; tween(stroke, 0.14, { Transparency = 0.82 }) end)
+            ctx.Connect(object.MouseLeave, function() hovered = false; tween(stroke, 0.18, { Transparency = 1 }) end)
+            ctx.Connect(object.MouseButton1Down, function() tween(stroke, 0.07, { Transparency = 0.62 }) end)
+            ctx.Connect(object.MouseButton1Up, function() tween(stroke, 0.14, { Transparency = hovered and 0.82 or 1 }) end)
+        elseif mainBar and object.Parent == mainBar and object:IsA("Frame") then
+            bound[object] = true
+            positions[object] = object.Position
+            ctx.Connect(object:GetPropertyChangedSignal("Visible"), function()
+                if object.Visible then entrance(object) else cancel(object); object.Position = positions[object] end
+            end)
+            if object.Visible then entrance(object) end
+        end
+    end
+    for _, object in ipairs(root:GetDescendants()) do bind(object) end
+    ctx.Connect(root.DescendantAdded, bind)
+    function motion:Update()
+        for object in pairs(active) do cancel(object) end
+        for container, position in pairs(positions) do
+            if container.Parent then
+                container.Position = position
+                tween(container, 0, { AnchorPoint = Vector2.new(0, 0) })
+            end
+        end
+        for _, stroke in ipairs(strokes) do if stroke.Parent then stroke.Transparency = 1 end end
+    end
+    ctx.OnCleanup(function()
+        for object in pairs(active) do cancel(object) end
+        for container, position in pairs(positions) do if container.Parent then container.Position = position end end
+        for _, stroke in ipairs(strokes) do stroke:Destroy() end
+    end)
+    return motion
 end
 function Extras.CreateSounds(ctx)
     local prefs, sounds = ctx.Preferences, {}
@@ -1448,6 +1530,9 @@ function Extras.Build(ctx)
     end })
     appearance:Toggle({ Title = "Background blur", Desc = "Turn off for clearer gameplay or lower graphics overhead.", Value = prefs.Blur, Callback = function(value)
         prefs.Blur = value; ctx.WindUI:ToggleAcrylic(value); save()
+    end })
+    appearance:Toggle({ Title = "Reduced motion", Desc = "Use instant tab transitions and hover feedback. WindUI's window and control animations still apply.", Value = prefs.ReducedMotion, Callback = function(value)
+        prefs.ReducedMotion = value; ctx.Session.Motion:Update(); save()
     end })
     local audio = settings:Section({ Title = "Interface sounds", Opened = true, Box = true })
     audio:Toggle({ Title = "Enable interface sounds", Desc = "Startup, reopening the window, and button clicks.", Value = prefs.Sounds, Callback = function(value)
