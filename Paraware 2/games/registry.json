@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "places": {
+    "123456789": {
+      "name": "My Game",
+      "file": "places/123456789.lua"
+    }
+  },
+  "universes": {}
+}
