@@ -1816,6 +1816,21 @@ return function(context)
             maker:SetSource(value.Id,args.source);record(value.Id)
             return {scriptId=value.Id,version=meta.version,status='Draft updated; not run'}
         end
+        if tool=='run_script' then
+            assert(args.expectedVersion==meta.version,'Version conflict. Read the script before running it.')
+            assert(value.Mode=='Managed','MCP runs managed scripts only')
+            if value.Status=='Running' then return {scriptId=value.Id,status=value.Status,alreadyRunning=true} end
+            local ok,err=maker:Run(value.Id)
+            assert(ok,err or 'Script launch failed')
+            return {scriptId=value.Id,status=value.Status,version=meta.version,note='Launched in Script Maker. Use get_script_output to check results.'}
+        end
+        if tool=='stop_script' then
+            maker:Stop(value.Id,'Stopped');return {scriptId=value.Id,status=value.Status}
+        end
+        if tool=='get_script_output' then
+            local logs={};for index=math.max(1,#value.Logs-19),#value.Logs do logs[#logs+1]=value.Logs[index]:sub(1,4000) end
+            return {scriptId=value.Id,status=value.Status,version=meta.version,logs=logs}
+        end
         if tool=='save_script' then
             local writer=context.WriteFile or writefile;assert(type(writer)=='function','Executor file writing unavailable')
             if makefolder then pcall(makefolder,'Paraware-Scripts') end
@@ -1841,7 +1856,7 @@ return function(context)
             end
             call('POST','/commands/result',payload)
         end
-        status('Connected · '..self.ClientId..'\nGame '..game.PlaceId..' · Commands synchronized. Script execution stays in Script Maker.')
+        status('Connected · '..self.ClientId..'\nGame '..game.PlaceId..' · Commands synchronized. Run/stop/output tools are available through Script Maker.')
     end
     function session:Connect()
         assert(self.Alive,'MCP unloaded');if self.Connected then return end
@@ -1871,7 +1886,7 @@ return function(context)
     tab:Button({Title='Connect game',Callback=function() action(function() session:Configure(url,key);session:Connect() end) end})
     tab:Button({Title='Disconnect',Callback=function() session:Disconnect() end})
     tab:Button({Title='Copy game session ID',Callback=function() action(function() assert(setclipboard,'Clipboard unavailable');setclipboard(session.ClientId) end) end})
-    tab:Paragraph({Title='Available tools',Desc='Inspect the client hierarchy; list, read, create, edit and save Paraware scripts. Edits use version checks. AI-created scripts stay as unrun drafts.'})
+    tab:Paragraph({Title='Available tools',Desc='Inspect the client hierarchy; list, read, create, edit, save, run, stop and inspect output for Paraware scripts. Edits use version checks. ChatGPT can save, run, stop and check managed scripts when requested.'})
     tab:Paragraph({Title='What is shared',Desc='Connecting publishes up to 500 object names, classes and paths, plus scripts you create in Script Maker when requested. It does not expose server scripts, arbitrary game script source or player chat.'})
     return session
 end
