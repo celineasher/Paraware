@@ -13,7 +13,7 @@ local Config = {
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
 local createScriptMaker
-local createAIChat
+local createMCP
 local embeddedLogo
 
 local GameModules = { Places = {}, Universes = {} }
@@ -1012,14 +1012,14 @@ local function build()
     local maker = createScriptMaker({ Tab = makerTab, Player = Player, Input = Input, Connect = connect, Notify = notify })
     table.insert(cleanups, function() maker:Unload() end)
     Session.ScriptMaker = maker
-    local aiTab = Window:Tab({ Title = "AI Chat", Icon = "message-circle" })
-    local ai = createAIChat({ Tab = aiTab, Maker = maker, Player = Player, Input = Input, Connect = connect, Notify = notify,
+    local mcpTab = Window:Tab({ Title = "MCP", Icon = "plug" })
+    local mcp = createMCP({ Tab = mcpTab, Maker = maker, Player = Player, Input = Input, Connect = connect, Notify = notify,
         IsTool = function(node)
             return Window.UIElements and Window.UIElements.Main and node:IsDescendantOf(Window.UIElements.Main)
         end,
     })
-    table.insert(cleanups, function() ai:Unload() end)
-    Session.AIChat = ai
+    table.insert(cleanups, function() mcp:Unload() end)
+    Session.MCP = mcp
     local settings = Window:Tab({ Title = "Session", Icon = "settings" })
     if Window.UIElements then
         Window.UIElements.SideBarContainer.Visible = true
@@ -1359,6 +1359,7 @@ return function(context)
     function manager:SetSource(id, code)
         assert(#code <= 131072, 'Source exceeds 128 KB')
         self.Records[id].Code = code
+        changed()
     end
     function manager:Check(id)
         local record = assert(self.Records[id])
@@ -1742,354 +1743,137 @@ return function(context)
 end
 
 end)()
-createAIChat = (function()
+createMCP = (function()
 return function(context)
-    local chat = { Alive=true, Busy=false, Messages={}, ChatId=nil, Drafts={}, Snapshot=nil, Imported={}, PollGeneration=0, VisibleCount=40 }
-    local http = context.Http or game:GetService('HttpService')
-    local requestFn = context.Request or request or http_request or (syn and syn.request)
-    local scheduler = context.Task or task
-    local base, token, provider = 'http://127.0.0.1:8787', '', 'browser'
-    local includeContext, includeSource = false, false
-    local clientId = 'game-' .. tostring(game.PlaceId) .. '-' .. tostring(os.time()) .. '-' .. tostring(math.random(100000,999999))
-    chat.ClientId=clientId
-    local render = function() end
-    local status = function() end
-    function chat:Configure(url, pairingToken, chosenProvider)
-        assert(url:match('^http://127%.0%.0%.1:%d+$') or url:match('^http://localhost:%d+$'), 'Use a local bridge URL such as http://127.0.0.1:8787')
-        assert(chosenProvider=='openai' or chosenProvider=='claude' or chosenProvider=='browser', 'Choose ChatGPT browser, OpenAI or Claude')
-        base,token,provider=url,pairingToken,chosenProvider
-    end
+    local http=context.Http or game:GetService('HttpService')
+    local requestFn=context.Request or request or http_request or (syn and syn.request)
+    local scheduler=context.Task or task
+    local maker=context.Maker
+    local session={Alive=true,Connected=false,ClientId='game-'..game.PlaceId..'-'..os.time()..'-'..math.random(100000,999999),Versions={},Processed={},ProcessedOrder={}, PollGeneration=0}
+    local base,token='http://127.0.0.1:8787',''
+    local status=function() end
     local function call(method,path,body)
-        assert(chat.Alive, 'AI Chat was unloaded')
-        assert(type(requestFn)=='function', 'This executor has no HTTP request API')
-        assert(#token>=24, 'Paste the bridge pairing token in Settings first')
-        local options={Url=base..path,Method=method,Headers={['Content-Type']='application/json',Authorization='Bearer '..token},Timeout=110}
+        assert(type(requestFn)=='function','Executor HTTP request API unavailable')
+        assert(#token>=24,'Paste the companion pairing token first')
+        local options={Url=base..path,Method=method,Headers={Authorization='Bearer '..token,['Content-Type']='application/json'},Timeout=10}
         if body then options.Body=http:JSONEncode(body) end
-        local response=requestFn(options)
-        assert(response and response.StatusCode, 'Bridge did not respond. Start it on your Mac and check the URL')
-        local ok,data=pcall(http.JSONDecode,http,response.Body or '')
-        assert(ok and type(data)=='table', 'Bridge returned invalid JSON')
-        assert(response.StatusCode>=200 and response.StatusCode<300, data.error or ('Bridge HTTP '..response.StatusCode))
-        return data
+        local response=requestFn(options);assert(response and response.StatusCode,'Companion did not respond')
+        local value=http:JSONDecode(response.Body or '')
+        assert(response.StatusCode>=200 and response.StatusCode<300,value.error or 'Companion request failed')
+        return value
     end
-    local clipboard = context.Clipboard or setclipboard or toclipboard
-    local readLocal,writeLocal = context.ReadFile or readfile, context.WriteFile or writefile
-    local bookmark='Paraware-Chats/last-chat-'..tostring(game.PlaceId)..'.json'
-    local function remember()
-        if type(writeLocal)~='function' then return end
-        pcall(function()
-            if makefolder then pcall(makefolder,'Paraware-Chats') end
-            writeLocal(bookmark,http:JSONEncode({chatId=chat.ChatId}))
-        end)
+    function session:Configure(url,key)
+        assert(url:match('^http://127%.0%.0%.1:%d+$') or url:match('^http://localhost:%d+$'),'Use a loopback companion URL')
+        base,token=url,key
     end
-    function chat:Copy(text)
-        assert(type(clipboard)=='function','Clipboard unavailable in this executor')
-        assert(type(text)=='string' and #text>0,'Nothing to copy yet')
-        clipboard(text);return text
-    end
-    function chat:CodeBlocks(text)
-        local blocks,seen={},{}
-        for language,source in text:gmatch('```([^\n`]*)\n(.-)```') do
-            language=language:lower():match('^%s*(.-)%s*$')
-            if language=='' or language=='lua' or language=='luau' or language=='roblox' then
-                source=source:gsub('^\n',''):gsub('\n$','')
-                if source:match('%S') and not seen[source] then seen[source]=true;blocks[#blocks+1]={name='Script '..(#blocks+1),source=source} end
-            end
-        end
-        if #blocks==0 and not text:find('```',1,true) and (text:match('^%s*local%s') or text:match('^%s*loadstring%s*%(') or text:match('^%s*%-%-')) then blocks[1]={name='Script',source=text} end
-        return blocks
-    end
-    function chat:CopyLatest(scriptOnly)
-        for index=#self.Messages,1,-1 do
-            if self.Messages[index].role=='assistant' then
-                local text=self.Messages[index].content
-                if scriptOnly then local block=self:CodeBlocks(text)[1];assert(block,'The latest reply has no script');text=block.source end
-                return self:Copy(text)
-            end
-        end
-        error('No AI reply yet')
-    end
-    function chat:ListChats() return call('GET','/chats').chats or {} end
-    function chat:Resume()
-        if self.ChatId or type(readLocal)~='function' then return false end
-        local ok,saved=pcall(function() return http:JSONDecode(readLocal(bookmark)) end)
-        if ok and type(saved)=='table' and type(saved.chatId)=='string' and saved.chatId:match('^[%w_-]+$') then self:Load(saved.chatId);return true end
-        return false
-    end
-    function chat:Job(callback)
-        if self.Busy then status('A request is already in progress');return end
-        self.Busy=true;render();status('Working...')
-        scheduler.spawn(function()
-            local ok,err=pcall(callback)
-            self.Busy=false
-            if not self.Alive then return end
-            if not ok then status(tostring(err)) else status('Ready') end
-            render()
-        end)
-    end
-    function chat:Scan()
+    function session:Snapshot()
         local objects={}
-        local inspected=0
-        local function isTool(node)
-            local cursor=node
-            while cursor and cursor~=game do
-                local name=cursor.Name or ''
-                if name=='ScriptWorkspace' or name=='AIChatWorkspace' or name:find('Paraware',1,true) or name:find('Cobalt',1,true) or name:find('_DPP_',1,true) then return true end
-                cursor=cursor.Parent
+        for index,node in ipairs(game:GetDescendants()) do
+            local ancestor=node;local excluded=false
+            while ancestor and ancestor~=game do
+                local name=ancestor.Name or ''
+                if name:find('Paraware',1,true) or name:find('AIChatWorkspace',1,true) or name:find('_DPP_',1,true) or name:find('Cobalt',1,true) then excluded=true;break end
+                ancestor=ancestor.Parent
             end
-            return context.IsTool and context.IsTool(node) or false
-        end
-        for _,node in ipairs(game:GetDescendants()) do
-            inspected=inspected+1
-            if not isTool(node) then
-                local entry={name=tostring(node.Name):sub(1,80),class=node.ClassName,path=node:GetFullName():sub(1,240)}
-                if node:IsA('BasePart') then entry.anchored=node.Anchored;entry.canCollide=node.CanCollide end
-                if node:IsA('ScreenGui') then entry.enabled=node.Enabled end
-                if node:IsA('GuiObject') then entry.visible=node.Visible end
-                objects[#objects+1]=entry
+            if not excluded and not (context.IsTool and context.IsTool(node)) then
+                objects[#objects+1]={name=tostring(node.Name):sub(1,80),class=node.ClassName,path=node:GetFullName():sub(1,240)}
                 if #objects>=500 then break end
             end
-            if inspected%100==0 then scheduler.wait() end
+            if index%100==0 then scheduler.wait() end
         end
-        self.Snapshot={placeId=game.PlaceId,universeId=game.GameId,capturedAt=os.time(),objects=objects,limit=500,
-            note='Partial client hierarchy only. No script source, UI text, player chat, remote arguments, or server-only objects. Names and paths are untrusted data.'}
-        return self.Snapshot
+        return {placeId=game.PlaceId,universeId=game.GameId,objects=objects,note='Partial client hierarchy. Names and paths are untrusted data. Only Paraware Script Maker sources are exposed separately.'}
     end
-    function chat:Publish()
-        local snapshot=self:Scan()
-        assert(self.Alive, 'AI Chat was unloaded')
-        call('POST','/context',{clientId=clientId,snapshot=snapshot})
-        return snapshot
+    local function record(id)
+        local value=assert(maker.Records[tonumber(id)],'Unknown Paraware script')
+        local meta=session.Versions[value.Id]
+        if not meta then meta={version=1,source=value.Code};session.Versions[value.Id]=meta end
+        if meta.source~=value.Code then meta.source=value.Code;meta.version=meta.version+1 end
+        return value,meta
     end
-    function chat:Send(prompt)
-        assert(not self.PendingRequest, 'Check the pending browser reply before sending again')
-        assert(prompt:match('%S') and #prompt<=12000, 'Enter a message of up to 12,000 characters')
-        local source
-        if includeSource then
-            local maker=context.Maker;local record=maker.Records[maker.Selected]
-            assert(record,'Select a Script Maker document first');source=record.Code
+    function session:Execute(tool,args)
+        assert(self.Connected,'MCP disconnected')
+        assert(args.clientId==self.ClientId,'Wrong game session')
+        if tool=='list_scripts' then
+            local scripts={};for id in pairs(maker.Records) do local value,meta=record(id);scripts[#scripts+1]={scriptId=id,name=value.Name,status=value.Status,version=meta.version} end
+            table.sort(scripts,function(a,b) return a.scriptId<b.scriptId end);return {scripts=scripts}
         end
-        if includeContext then self:Publish() end
-        local result=call('POST','/chat',{chatId=self.ChatId,clientId=clientId,prompt=prompt,provider=provider,includeContext=includeContext,source=source})
-        if not self.Alive then return end
-        self.ChatId=result.chat.id;self.Messages=result.chat.messages;self.Drafts=result.drafts or {};self.PendingRequest=result.pendingRequest;remember();render()
-        self.BrowserStatus=nil
-        if self.PendingRequest and (not context.Headless or context.AutoPoll) then self:WaitForBrowserReply() end
-        return result
-    end
-    function chat:WaitForBrowserReply()
-        local requestId=self.PendingRequest
-        if not requestId then return end
-        self.PollGeneration=self.PollGeneration+1;local generation=self.PollGeneration
-        local attempts=0
-        local poll
-        poll=function()
-            if not self.Alive or self.PendingRequest~=requestId or self.PollGeneration~=generation then return end
-            if self.Busy then scheduler.delay(2,poll);return end
-            attempts=attempts+1;self.Busy=true
-            local ok,ready=pcall(self.CheckBrowserReply,self)
-            self.Busy=false
-            if not self.Alive or self.PendingRequest~=requestId then status(self.BrowserStatus or 'Reply received');render();return end
-            if not ok then self.BrowserStatus=tostring(ready) end
-            status(self.BrowserStatus or 'ChatGPT is answering...');render()
-            if attempts<450 then scheduler.delay(2,poll) else self.BrowserStatus='Automatic wait paused. Check the extension or press Check reply.';status(self.BrowserStatus) end
+        if tool=='create_script' then
+            assert(type(args.name)=='string' and #args.name>0 and #args.name<=80,'Invalid script name')
+            assert(type(args.source)=='string' and #args.source>0 and #args.source<=131072,'Invalid source')
+            local parentName=args.parent or 'PlayerScripts'
+            assert(parentName=='PlayerScripts' or parentName=='PlayerGui' or parentName=='Character','Unsupported parent')
+            local parent=parentName=='Character' and context.Player.Character or context.Player:FindFirstChild(parentName)
+            assert(parent,'Requested parent is unavailable')
+            local id=maker:Create(args.name,'Local',nil,parent,args.source);local value,meta=record(id)
+            return {scriptId=id,name=value.Name,version=meta.version,status='Draft created; not run. Use save_script to save it.'}
         end
-        scheduler.delay(2,poll)
-    end
-    function chat:CheckBrowserReply()
-        assert(self.PendingRequest, 'No browser reply is pending')
-        local requestId=self.PendingRequest
-        local result=call('GET','/browser/result/'..requestId)
-        if not self.Alive or self.PendingRequest~=requestId then return false end
-        if result.cancelled then
-            self.PendingRequest=nil;self.BrowserStatus=result.status;status(result.status);render()
-        elseif result.ready then
-            self.ChatId=result.chat.id;self.Messages=result.chat.messages;self.Drafts=result.drafts or {};self.PendingRequest=nil;self.BrowserStatus=nil;remember();render()
-        else
-            self.BrowserStatus=result.status
+        local value,meta=record(args.scriptId)
+        if tool=='read_script' then return {scriptId=value.Id,name=value.Name,source=value.Code,version=meta.version,status=value.Status} end
+        if tool=='edit_script' then
+            assert(args.expectedVersion==meta.version,'Version conflict. Read the script again before editing.')
+            assert(value.Status~='Running','Stop this script in Script Maker before editing')
+            assert(type(args.source)=='string' and #args.source>0 and #args.source<=131072,'Invalid source')
+            maker:SetSource(value.Id,args.source);record(value.Id)
+            return {scriptId=value.Id,version=meta.version,status='Draft updated; not run'}
         end
-        return result.ready
+        if tool=='save_script' then
+            local writer=context.WriteFile or writefile;assert(type(writer)=='function','Executor file writing unavailable')
+            if makefolder then pcall(makefolder,'Paraware-Scripts') end
+            local path='Paraware-Scripts/MCP-'..value.Id..'-'..value.Name:gsub('[^%w_-]','_'):sub(1,60)..'.luau'
+            writer(path,value.Code);return {scriptId=value.Id,path=path,version=meta.version,status='Saved to executor workspace'}
+        end
+        error('Unsupported MCP command')
     end
-    function chat:SetContext(enabled, selectedSource) includeContext=enabled;includeSource=selectedSource end
-    function chat:New()
-        assert(not self.Busy,'Wait for the current request to finish')
-        if self.PendingRequest then call('POST','/browser/cancel',{requestId=self.PendingRequest}) end
-        self.VisibleCount=40;self.PollGeneration=self.PollGeneration+1;self.ChatId=nil;self.Messages={};self.Drafts={};self.PendingRequest=nil;remember();render()
-    end
-    function chat:Load(id)
-        local result=call('GET','/chats/'..id)
-        if not self.Alive then return end
-        if self.PendingRequest and self.ChatId~=id then call('POST','/browser/cancel',{requestId=self.PendingRequest}) end
-        self.PollGeneration=self.PollGeneration+1
-        self.VisibleCount=40;self.ChatId=result.id;self.Messages=result.messages;self.Drafts={};self.PendingRequest=result.pendingRequest;self.BrowserStatus=nil;remember()
-        for i=#result.messages,1,-1 do
-            if result.messages[i].role=='assistant' then
-                self.Drafts=self:CodeBlocks(result.messages[i].content)
-                break
+    function session:Tick()
+        if not self.Alive or not self.Connected then return end
+        if not self.CachedSnapshot or os.clock()-(self.SnapshotAt or 0)>10 then self.CachedSnapshot=self:Snapshot();self.SnapshotAt=os.clock() end
+        call('POST','/clients',{clientId=self.ClientId,snapshot=self.CachedSnapshot})
+        local result=call('GET','/commands/'..self.ClientId)
+        for _,command in ipairs(result.commands or {}) do
+            if not self.Connected or not self.Alive then break end
+            local payload=self.Processed[command.id]
+            if not payload then
+                local ok,value=pcall(self.Execute,self,command.tool,command.args)
+                payload={id=command.id,clientId=self.ClientId}
+                if ok then payload.result=value else payload.error=tostring(value) end
+                self.Processed[command.id]=payload;self.ProcessedOrder[#self.ProcessedOrder+1]=command.id
+                if #self.ProcessedOrder>128 then self.Processed[table.remove(self.ProcessedOrder,1)]=nil end
             end
+            call('POST','/commands/result',payload)
         end
-        render()
-        if self.PendingRequest and (not context.Headless or context.AutoPoll) then self:WaitForBrowserReply() end
+        status('Connected · '..self.ClientId..'\nGame '..game.PlaceId..' · Commands synchronized. Script execution stays in Script Maker.')
     end
-    function chat:Import(draft)
-        assert(draft and type(draft.source)=='string' and #draft.source>0 and #draft.source<=131072, 'Choose a valid script draft')
-        if draft.id and self.Imported[draft.id] then return self.Imported[draft.id] end
-        local id=context.Maker:Create(draft.name or 'AI draft','Local',nil,context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui'),draft.source)
-        if draft.id then self.Imported[draft.id]=id end
-        return id
-    end
-    function chat:Inbox()
-        local result=call('GET','/drafts/'..clientId)
-        if not self.Alive then return end
-        self.Drafts=result.drafts or {};render();return self.Drafts
-    end
-    function chat:ImportSelected(index)
-        local draft=assert(self.Drafts[index], 'Select a draft first')
-        local id=self:Import(draft)
-        if draft.id then call('POST','/drafts/ack',{clientId=clientId,id=draft.id}) end
-        return id
-    end
-    function chat:Unload() self.Alive=false;self.PollGeneration=self.PollGeneration+1 end
-    if context.Headless then return chat end
-    local tab=context.Tab
-    local bridgeURL, pairingToken, chosenProvider=base,token,provider
-    local contextToggle, sourceToggle=false,false
-    local draftIndex=1
-    local chatPicker, draftPicker, transcript, composer, banner, sendButton, history, ui, button, savedPanel
-    local renderedKey
-    local function job(callback) chat:Job(callback) end
-    local function configure() chat:Configure(bridgeURL,pairingToken,chosenProvider);chat:SetContext(contextToggle,sourceToggle) end
-    local connection=tab:Paragraph({Title='Local bridge',Desc='Start the included bridge on your Mac, then paste its pairing token here. Provider API keys stay in the bridge .env file.'})
-    tab:Input({Title='Bridge URL',Value=base,Placeholder=base,Callback=function(value) bridgeURL=value end})
-    tab:Input({Title='Pairing token',Placeholder='Local bridge token, never your provider API key',Callback=function(value) pairingToken=value end})
-    tab:Dropdown({Title='AI provider',Values={'ChatGPT browser (no API key)','OpenAI API','Claude API'},Value='ChatGPT browser (no API key)',Callback=function(value) chosenProvider=value=='Claude API' and 'claude' or (value=='OpenAI API' and 'openai' or 'browser') end})
-    tab:Paragraph({Title='ChatGPT browser mode',Desc='Enable automatic chat once in the companion Chrome extension, using a dedicated ChatGPT tab. Then send messages here; the extension sends prompts and returns replies automatically. No API key is needed.'})
-    tab:Button({Title='Check browser reply',Callback=function() job(function() configure();local ready=chat:CheckBrowserReply();context.Notify(ready and 'Reply received. Drafts are ready to import.' or 'Still waiting. Return the ChatGPT reply through the extension.') end) end})
-    tab:Button({Title='Connect bridge',Callback=function() job(function() configure();local info=call('GET','/health');connection:SetDesc('Connected. ChatGPT browser works without API keys.\nOpenAI API configured: '..tostring(info.providers.openai)..' | Claude API configured: '..tostring(info.providers.claude)..'\nClient: '..clientId);chat:Resume() end) end})
-    tab:Toggle({Title='Include game snapshot with messages',Desc='Sends up to 500 names, classes and paths to the chosen provider when you press Send.',Value=false,Callback=function(value) contextToggle=value end})
-    tab:Toggle({Title='Include selected Script Maker source',Desc='Sends the code in your currently selected document with your next message.',Value=false,Callback=function(value) sourceToggle=value end})
-    local snapshotInfo=tab:Paragraph({Title='Game snapshot',Desc='No snapshot published. Scans happen only when requested or when Send includes context.'})
-    tab:Button({Title='Scan and publish game snapshot',Desc='Makes a capped client snapshot available to MCP tools. Does not send it to an AI provider by itself.',Callback=function() job(function() configure();local snapshot=chat:Publish();snapshotInfo:SetDesc('Published '..#snapshot.objects..' objects. Place '..snapshot.placeId..'\nClient: '..clientId) end) end})
-    tab:Button({Title='Copy published snapshot',Callback=function() local ok,err=pcall(function() assert(chat.Snapshot,'Scan first');assert(setclipboard,'Clipboard unsupported');setclipboard(http:JSONEncode(chat.Snapshot)) end);if not ok then context.Notify(tostring(err)) end end})
-    chatPicker=tab:Dropdown({Title='Saved chats',Values={},Callback=function(value) job(function() configure();chat:Load(tostring(value):match('^([^|]+)')) end) end})
-    tab:Button({Title='Reload saved chats',Callback=function() job(function() configure();local result=call('GET','/chats');local names={};for _,saved in ipairs(result.chats) do names[#names+1]=saved.id..'|'..saved.title end;chatPicker:Refresh(names) end) end})
-    tab:Button({Title='Export current chat',Callback=function() local ok,err=pcall(function() assert(writefile,'File writing unsupported');if makefolder then pcall(makefolder,'Paraware-Chats') end;writefile('Paraware-Chats/'..(chat.ChatId or clientId)..'.json',http:JSONEncode({messages=chat.Messages,chatId=chat.ChatId}));context.Notify('Saved to Paraware-Chats in your executor workspace') end);if not ok then context.Notify(tostring(err)) end end})
-    tab:Button({Title='Delete current saved chat',Callback=function() job(function() configure();assert(chat.ChatId,'No saved chat selected');call('DELETE','/chats/'..chat.ChatId);chat.ChatId=nil;chat.Messages={};chat.Drafts={};chat.PendingRequest=nil;chat.PollGeneration=chat.PollGeneration+1;remember() end) end})
-    draftPicker=tab:Dropdown({Title='Script drafts',Values={},Callback=function(value) draftIndex=tonumber(tostring(value):match('^(%d+)')) or 1 end})
-    tab:Button({Title='Fetch MCP draft inbox',Callback=function() job(function() configure();chat:Inbox() end) end})
-    tab:Button({Title='Import selected draft',Desc='Creates an unrun Script Maker document. Review the source before choosing Run.',Callback=function() job(function() configure();chat:ImportSelected(draftIndex);context.Notify('Draft added to Script Maker. It has not been run.') end) end})
-    tab:Paragraph({Title='MCP connection',Desc='The included local MCP server supports Claude Desktop and compatible clients. HTTP MCP endpoint: '..base..'/mcp. ChatGPT requires its supported remote or secure-tunnel setup. Tools read a published snapshot and queue drafts only.'})
-    ui=function(class,properties,parent)
-        local item=Instance.new(class);for key,value in pairs(properties) do item[key]=value end;if parent==transcript and item:IsA('GuiObject') then item.LayoutOrder=#parent:GetChildren() end;item.Parent=parent;return item
-    end
-    local viewport=tab.ContainerFrame
-    local settings=tab.UIElements and tab.UIElements.ContainerFrame
-    if viewport and settings then
-        viewport.ClipsDescendants=true
-        local root=ui('Frame',{Name='AIChatWorkspace',ClipsDescendants=true,Size=UDim2.new(1,-12,1,-12),Position=UDim2.fromOffset(6,6),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0},viewport)
-        ui('UICorner',{CornerRadius=UDim.new(0,10)},root)
-        ui('TextLabel',{Position=UDim2.fromOffset(12,8),Size=UDim2.new(1,-310,0,30),Text='Paraware AI',BackgroundTransparency=1,TextColor3=Color3.fromRGB(238,238,244),Font=Enum.Font.GothamMedium,TextSize=15,TextXAlignment=Enum.TextXAlignment.Left},root)
-        local body=ui('Frame',{Position=UDim2.fromOffset(0,46),Size=UDim2.new(1,0,1,-46),BackgroundTransparency=1,ClipsDescendants=true},root)
-        history=ui('ScrollingFrame',{Position=UDim2.fromOffset(10,8),Size=UDim2.new(1,-20,1,-150),BackgroundColor3=Color3.fromRGB(12,12,17),BorderSizePixel=0,ClipsDescendants=true,AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.fromOffset(0,0),ScrollBarThickness=4},body)
-        transcript=ui('Frame',{Name='Messages',Size=UDim2.new(1,-16,0,0),Position=UDim2.fromOffset(8,8),AutomaticSize=Enum.AutomaticSize.Y,BackgroundTransparency=1},history)
-        ui('UIListLayout',{Padding=UDim.new(0,12),SortOrder=Enum.SortOrder.LayoutOrder},transcript)
-        composer=ui('TextBox',{Position=UDim2.new(0,10,1,-132),Size=UDim2.new(1,-20,0,74),Text='',PlaceholderText='Ask a question or describe the script you want...',ClearTextOnFocus=false,MultiLine=true,TextWrapped=true,BackgroundColor3=Color3.fromRGB(32,32,40),TextColor3=Color3.fromRGB(238,238,245),PlaceholderColor3=Color3.fromRGB(170,170,184),Font=Enum.Font.Gotham,TextSize=14,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,ClipsDescendants=true},body)
-        ui('UIPadding',{PaddingLeft=UDim.new(0,10),PaddingRight=UDim.new(0,10),PaddingTop=UDim.new(0,8),PaddingBottom=UDim.new(0,8)},composer)
-        banner=ui('TextLabel',{Position=UDim2.new(0,10,1,-48),Size=UDim2.new(1,-116,0,30),Text='Not connected. Open Settings to pair.',TextTruncate=Enum.TextTruncate.AtEnd,BackgroundTransparency=1,TextColor3=Color3.fromRGB(189,189,204),Font=Enum.Font.Gotham,TextSize=12,TextXAlignment=Enum.TextXAlignment.Left},body)
-        button=function(text,position,size,parent,callback)
-            local item=ui('TextButton',{Text=text,Position=position,Size=size,BackgroundColor3=Color3.fromRGB(44,48,59),TextColor3=Color3.fromRGB(237,237,245),Font=Enum.Font.GothamMedium,TextSize=13},parent)
-            ui('UICorner',{CornerRadius=UDim.new(0,6)},item);context.Connect(item.MouseButton1Click,callback);return item
-        end
-        local function submitMessage()
-            local prompt=composer.Text
-            job(function()
-                configure()
-                if chat.PendingRequest then chat:CheckBrowserReply() else chat:Send(prompt);if chat.Alive then composer.Text='' end end
-            end)
-        end
-        sendButton=button('Send',UDim2.new(1,-96,1,-48),UDim2.fromOffset(86,30),body,submitMessage)
-        if context.Input then
-            context.Connect(context.Input.InputBegan,function(key)
-                if context.Input:GetFocusedTextBox()==composer and key.KeyCode==Enum.KeyCode.Return
-                    and not context.Input:IsKeyDown(Enum.KeyCode.LeftShift) and not context.Input:IsKeyDown(Enum.KeyCode.RightShift) then
-                    submitMessage()
-                end
-            end)
-        end
-        button('New chat',UDim2.new(1,-212,0,8),UDim2.fromOffset(92,30),root,function() if chat.Busy then return end;local ok,err=pcall(chat.New,chat);status(ok and 'New conversation' or tostring(err)) end)
-        savedPanel=ui('ScrollingFrame',{Name='SavedChats',Position=UDim2.fromOffset(10,54),Size=UDim2.new(1,-20,1,-64),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0,Visible=false,ClipsDescendants=true,AutomaticCanvasSize=Enum.AutomaticSize.Y,CanvasSize=UDim2.fromOffset(0,0),ScrollBarThickness=4,ZIndex=5},root)
-        ui('UIListLayout',{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder},savedPanel)
-        button('History',UDim2.new(1,-292,0,8),UDim2.fromOffset(72,30),root,function()
-            if chat.Busy then return end
-            if savedPanel.Visible then savedPanel.Visible=false;body.Visible=true;return end
-            job(function()
-                configure();local saved=chat:ListChats()
-                for _,child in ipairs(savedPanel:GetChildren()) do if child:IsA('GuiObject') then child:Destroy() end end
-                for index,item in ipairs(saved) do
-                    local row=button(item.title..'  ·  '..tostring(item.updatedAt):sub(1,10),UDim2.fromOffset(0,0),UDim2.new(1,-8,0,44),savedPanel,function()
-                        job(function() configure();chat:Load(item.id);savedPanel.Visible=false;body.Visible=true end)
-                    end)
-                    row.LayoutOrder=index;row.TextTruncate=Enum.TextTruncate.AtEnd;row.ZIndex=6
-                end
-                if #saved==0 then ui('TextLabel',{Size=UDim2.new(1,-8,0,60),Text='Your conversations appear here after you send a message.',TextWrapped=true,BackgroundTransparency=1,TextColor3=Color3.fromRGB(200,200,213),Font=Enum.Font.Gotham,TextSize=14,ZIndex=6},savedPanel) end
-                settings.Visible=false;savedPanel.Visible=true;body.Visible=false
-            end)
+    function session:Connect()
+        assert(self.Alive,'MCP unloaded');if self.Connected then return end
+        call('GET','/health');self.PollGeneration=self.PollGeneration+1;local generation=self.PollGeneration;self.Connected=true
+        local ok,err=pcall(self.Tick,self);if not ok then self.Connected=false;error(err) end
+        if context.Headless then return end
+        scheduler.spawn(function()
+            while self.Alive and self.Connected and self.PollGeneration==generation do
+                scheduler.wait(2);if not self.Alive or not self.Connected or self.PollGeneration~=generation then break end;local success,failure=pcall(self.Tick,self)
+                if not success then status('Connection interrupted: '..tostring(failure)..'\nKeep the companion running. Retrying automatically.') end
+            end
         end)
-        local settingsButton
-        settings.Parent=root;settings.Position=UDim2.fromOffset(8,46);settings.AnchorPoint=Vector2.new(0,0);settings.Size=UDim2.new(1,-16,1,-54);settings.Visible=false;settings.ClipsDescendants=true
-        settingsButton=button('Settings',UDim2.new(1,-106,0,8),UDim2.fromOffset(96,30),root,function() savedPanel.Visible=false;settings.Visible=not settings.Visible;body.Visible=not settings.Visible;settingsButton.Text=settings.Visible and 'Chat' or 'Settings' end)
     end
-    status=function(message) if banner then banner.Text=chat.PendingRequest and (chat.BrowserStatus or 'Waiting for automatic ChatGPT reply...') or message end end
-    render=function()
-        if not chat.Alive then return end
-        local key=tostring(chat.ChatId)..':'..chat.VisibleCount..':'..#chat.Messages..':'..(chat.Messages[#chat.Messages] and chat.Messages[#chat.Messages].content or '')
-        if transcript and renderedKey~=key then
-            renderedKey=key
-            for _,child in ipairs(transcript:GetChildren()) do if child:IsA('GuiObject') then child:Destroy() end end
-            local function textRow(text,color,font,size)
-                return ui('TextLabel',{Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=text,TextWrapped=true,BackgroundTransparency=1,TextColor3=color,Font=font,TextSize=size,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top},transcript)
-            end
-            if #chat.Messages==0 then textRow('Ask a question or request a script. Replies and scripts will appear here.',Color3.fromRGB(177,177,193),Enum.Font.Gotham,14) end
-            if #chat.Messages>chat.VisibleCount then
-                button('Show earlier messages',UDim2.fromOffset(0,0),UDim2.new(1,0,0,32),transcript,function() chat.VisibleCount=chat.VisibleCount+40;render() end)
-            end
-            for index=math.max(1,#chat.Messages-chat.VisibleCount+1),#chat.Messages do
-                local message=chat.Messages[index];local assistant=message.role=='assistant'
-                textRow(assistant and 'Paraware AI' or 'You',assistant and Color3.fromRGB(210,220,245) or Color3.fromRGB(177,177,193),Enum.Font.GothamMedium,13)
-                local blocks=assistant and chat:CodeBlocks(message.content) or {}
-                local prose=message.content
-                if #blocks>0 then
-                    prose=prose:gsub('```([^\n`]*)\n(.-)```',function(language,source)
-                        language=language:lower():match('^%s*(.-)%s*$')
-                        if language=='' or language=='lua' or language=='luau' or language=='roblox' then return '' end
-                        return '```'..language..'\n'..source..'```'
-                    end)
-                    if #blocks==1 and blocks[1].source==message.content then prose='' end
-                end
-                if prose:match('%S') then textRow(prose:sub(1,12000),Color3.fromRGB(226,226,237),Enum.Font.Gotham,14) end
-                if assistant then
-                    local toolbar=ui('Frame',{Size=UDim2.new(1,0,0,30),BackgroundTransparency=1},transcript)
-                    button('Copy reply',UDim2.fromOffset(0,0),UDim2.fromOffset(100,30),toolbar,function() local ok,err=pcall(chat.Copy,chat,message.content);status(ok and 'Reply copied' or tostring(err)) end)
-                    for blockIndex,block in ipairs(blocks) do
-                        textRow('Script '..blockIndex,Color3.fromRGB(210,220,245),Enum.Font.GothamMedium,13)
-                        local preview=block.source:sub(1,6000);local lines,longest=1,0
-                        for line in (preview..'\n'):gmatch('(.-)\n') do lines=lines+1;longest=math.max(longest,#line) end
-                        local code=ui('ScrollingFrame',{Size=UDim2.new(1,0,0,150),BackgroundColor3=Color3.fromRGB(10,12,17),BorderSizePixel=0,ClipsDescendants=true,CanvasSize=UDim2.fromOffset(math.min(65536,math.max(600,longest*8)),lines*18+16),ScrollBarThickness=4},transcript)
-                        ui('TextBox',{Position=UDim2.fromOffset(8,8),Size=UDim2.fromOffset(math.min(65536,math.max(600,longest*8)),lines*18),Text=preview,TextEditable=false,ClearTextOnFocus=false,MultiLine=true,TextWrapped=false,BackgroundTransparency=1,TextColor3=Color3.fromRGB(211,226,242),Font=Enum.Font.Code,TextSize=13,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top},code)
-                        if #block.source>6000 then textRow('Preview shortened. Copy code includes the complete script.',Color3.fromRGB(177,177,193),Enum.Font.Gotham,12) end
-                        local actions=ui('Frame',{Size=UDim2.new(1,0,0,30),BackgroundTransparency=1},transcript)
-                        button('Copy code',UDim2.fromOffset(0,0),UDim2.fromOffset(100,30),actions,function() local ok,err=pcall(chat.Copy,chat,block.source);status(ok and 'Complete script copied' or tostring(err)) end)
-                        button('Script Maker',UDim2.fromOffset(108,0),UDim2.fromOffset(116,30),actions,function() local ok,err=pcall(chat.Import,chat,block);status(ok and 'Draft added to Script Maker' or tostring(err)) end)
-                    end
-                end
-            end
-            scheduler.defer(function() if chat.Alive and history then history.CanvasPosition=Vector2.new(0,math.max(0,(history.AbsoluteCanvasSize and history.AbsoluteCanvasSize.Y or 0)-(history.AbsoluteSize and history.AbsoluteSize.Y or 0))) end end)
-        end
-        if sendButton then sendButton.Text=chat.Busy and 'Waiting...' or (chat.PendingRequest and 'Check reply' or 'Send');sendButton.Active=not chat.Busy end
-        local values={};for index,draft in ipairs(chat.Drafts) do values[#values+1]=index..' | '..draft.name end;draftPicker:Refresh(values)
+    function session:Disconnect()
+        self.PollGeneration=self.PollGeneration+1;self.Connected=false;pcall(call,'POST','/clients/disconnect',{clientId=self.ClientId});status('Disconnected. Reconnect to share game context and Script Maker drafts.')
     end
-    render()
-    return chat
+    function session:Unload() self.Alive=false;self.Connected=false end
+    if context.Headless then return session end
+    local tab=context.Tab
+    local url,key=base,token
+    local info=tab:Paragraph({Title='Paraware MCP',Desc='Chat in ChatGPT. This tab connects your current Roblox client to the local MCP companion.'})
+    status=function(text) info:SetDesc(text) end
+    tab:Paragraph({Title='Connect your game',Desc='1. Start the new MCP companion on your Mac.\n2. Paste its pairing token below and connect.\n3. Select this game in the Chrome extension and start a session in ChatGPT.'})
+    tab:Input({Title='Companion URL',Value=base,Callback=function(value) url=value end})
+    tab:Input({Title='Pairing token',Placeholder='Token printed by Start.command',Callback=function(value) key=value end})
+    local function action(fn) scheduler.spawn(function() local ok,err=pcall(fn);if not ok then status(tostring(err)) end end) end
+    tab:Button({Title='Connect game',Callback=function() action(function() session:Configure(url,key);session:Connect() end) end})
+    tab:Button({Title='Disconnect',Callback=function() session:Disconnect() end})
+    tab:Button({Title='Copy game session ID',Callback=function() action(function() assert(setclipboard,'Clipboard unavailable');setclipboard(session.ClientId) end) end})
+    tab:Paragraph({Title='Available tools',Desc='Inspect the client hierarchy; list, read, create, edit and save Paraware scripts. Edits use version checks. AI-created scripts stay as unrun drafts.'})
+    tab:Paragraph({Title='What is shared',Desc='Connecting publishes up to 500 object names, classes and paths, plus scripts you create in Script Maker when requested. It does not expose server scripts, arbitrary game script source or player chat.'})
+    return session
 end
 
 end)()
