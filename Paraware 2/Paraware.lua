@@ -1013,7 +1013,7 @@ local function build()
     table.insert(cleanups, function() maker:Unload() end)
     Session.ScriptMaker = maker
     local aiTab = Window:Tab({ Title = "AI Chat", Icon = "message-circle" })
-    local ai = createAIChat({ Tab = aiTab, Maker = maker, Player = Player, Connect = connect, Notify = notify,
+    local ai = createAIChat({ Tab = aiTab, Maker = maker, Player = Player, Input = Input, Connect = connect, Notify = notify,
         IsTool = function(node)
             return Window.UIElements and Window.UIElements.Main and node:IsDescendantOf(Window.UIElements.Main)
         end,
@@ -1819,7 +1819,7 @@ return function(context)
     end
     function chat:Send(prompt)
         assert(not self.PendingRequest, 'Check the pending browser reply before sending again')
-        assert(#prompt>0 and #prompt<=12000, 'Enter a message of up to 12,000 characters')
+        assert(prompt:match('%S') and #prompt<=12000, 'Enter a message of up to 12,000 characters')
         local source
         if includeSource then
             local maker=context.Maker;local record=maker.Records[maker.Selected]
@@ -1829,13 +1829,35 @@ return function(context)
         local result=call('POST','/chat',{chatId=self.ChatId,clientId=clientId,prompt=prompt,provider=provider,includeContext=includeContext,source=source})
         if not self.Alive then return end
         self.ChatId=result.chat.id;self.Messages=result.chat.messages;self.Drafts=result.drafts or {};self.PendingRequest=result.pendingRequest;render()
+        self.BrowserStatus=nil
+        if self.PendingRequest and (not context.Headless or context.AutoPoll) then self:WaitForBrowserReply() end
         return result
+    end
+    function chat:WaitForBrowserReply()
+        local requestId=self.PendingRequest
+        if not requestId then return end
+        local attempts=0
+        local poll
+        poll=function()
+            if not self.Alive or self.PendingRequest~=requestId then return end
+            if self.Busy then scheduler.delay(2,poll);return end
+            attempts=attempts+1;self.Busy=true
+            local ok,ready=pcall(self.CheckBrowserReply,self)
+            self.Busy=false
+            if not self.Alive or self.PendingRequest~=requestId then status('Reply received');render();return end
+            if not ok then self.BrowserStatus=tostring(ready) end
+            status(self.BrowserStatus or 'ChatGPT is answering...');render()
+            if attempts<450 then scheduler.delay(2,poll) else self.BrowserStatus='Automatic wait paused. Check the extension or press Check reply.';status(self.BrowserStatus) end
+        end
+        scheduler.delay(2,poll)
     end
     function chat:CheckBrowserReply()
         assert(self.PendingRequest, 'No browser reply is pending')
         local result=call('GET','/browser/result/'..self.PendingRequest)
         if result.ready then
             self.ChatId=result.chat.id;self.Messages=result.chat.messages;self.Drafts=result.drafts or {};self.PendingRequest=nil;render()
+        else
+            self.BrowserStatus=result.status
         end
         return result.ready
     end
@@ -1887,7 +1909,7 @@ return function(context)
     tab:Input({Title='Bridge URL',Value=base,Placeholder=base,Callback=function(value) bridgeURL=value end})
     tab:Input({Title='Pairing token',Placeholder='Local bridge token, never your provider API key',Callback=function(value) pairingToken=value end})
     tab:Dropdown({Title='AI provider',Values={'ChatGPT browser (no API key)','OpenAI API','Claude API'},Value='ChatGPT browser (no API key)',Callback=function(value) chosenProvider=value=='Claude API' and 'claude' or (value=='OpenAI API' and 'openai' or 'browser') end})
-    tab:Paragraph({Title='ChatGPT browser mode',Desc='Uses your signed-in ChatGPT tab through the companion Chrome extension. Send queues a prompt; insert it with the extension, send it in ChatGPT, then return the reply. No API key is needed.'})
+    tab:Paragraph({Title='ChatGPT browser mode',Desc='Enable automatic chat once in the companion Chrome extension, using a dedicated ChatGPT tab. Then send messages here; the extension sends prompts and returns replies automatically. No API key is needed.'})
     tab:Button({Title='Check browser reply',Callback=function() job(function() configure();local ready=chat:CheckBrowserReply();context.Notify(ready and 'Reply received. Drafts are ready to import.' or 'Still waiting. Return the ChatGPT reply through the extension.') end) end})
     tab:Button({Title='Connect bridge',Callback=function() job(function() configure();local info=call('GET','/health');connection:SetDesc('Connected. ChatGPT browser works without API keys.\nOpenAI API configured: '..tostring(info.providers.openai)..' | Claude API configured: '..tostring(info.providers.claude)..'\nClient: '..clientId) end) end})
     tab:Toggle({Title='Include game snapshot with messages',Desc='Sends up to 500 names, classes and paths to the chosen provider when you press Send.',Value=false,Callback=function(value) contextToggle=value end})
@@ -1923,19 +1945,28 @@ return function(context)
             local item=ui('TextButton',{Text=text,Position=position,Size=size,BackgroundColor3=Color3.fromRGB(44,48,59),TextColor3=Color3.fromRGB(237,237,245),Font=Enum.Font.GothamMedium,TextSize=13},parent)
             ui('UICorner',{CornerRadius=UDim.new(0,6)},item);context.Connect(item.MouseButton1Click,callback);return item
         end
-        sendButton=button('Send',UDim2.new(1,-96,1,-48),UDim2.fromOffset(86,30),body,function()
+        local function submitMessage()
             local prompt=composer.Text
             job(function()
                 configure()
                 if chat.PendingRequest then chat:CheckBrowserReply() else chat:Send(prompt);if chat.Alive then composer.Text='' end end
             end)
-        end)
+        end
+        sendButton=button('Send',UDim2.new(1,-96,1,-48),UDim2.fromOffset(86,30),body,submitMessage)
+        if context.Input then
+            context.Connect(context.Input.InputBegan,function(key)
+                if context.Input:GetFocusedTextBox()==composer and key.KeyCode==Enum.KeyCode.Return
+                    and not context.Input:IsKeyDown(Enum.KeyCode.LeftShift) and not context.Input:IsKeyDown(Enum.KeyCode.RightShift) then
+                    submitMessage()
+                end
+            end)
+        end
         button('New chat',UDim2.new(1,-212,0,8),UDim2.fromOffset(92,30),root,function() if chat.Busy then return end;chat:New();status('New conversation') end)
         local settingsButton
         settings.Parent=root;settings.Position=UDim2.fromOffset(8,46);settings.AnchorPoint=Vector2.new(0,0);settings.Size=UDim2.new(1,-16,1,-54);settings.Visible=false;settings.ClipsDescendants=true
         settingsButton=button('Settings',UDim2.new(1,-106,0,8),UDim2.fromOffset(96,30),root,function() settings.Visible=not settings.Visible;body.Visible=not settings.Visible;settingsButton.Text=settings.Visible and 'Chat' or 'Settings' end)
     end
-    status=function(message) if banner then banner.Text=chat.PendingRequest and 'Browser request queued. Use the Chrome extension, then Check reply.' or message end end
+    status=function(message) if banner then banner.Text=chat.PendingRequest and (chat.BrowserStatus or 'Waiting for automatic ChatGPT reply...') or message end end
     render=function()
         if not chat.Alive then return end
         local text={}
