@@ -12,6 +12,7 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local createScriptMaker
 local embeddedLogo
 
 local GameModules = { Places = {}, Universes = {} }
@@ -1006,6 +1007,10 @@ local function build()
 
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
+    local makerTab = Window:Tab({ Title = "Script Maker", Icon = "code" })
+    local maker = createScriptMaker({ Tab = makerTab, Player = Player, Input = Input, Connect = connect, Notify = notify })
+    table.insert(cleanups, function() maker:Unload() end)
+    Session.ScriptMaker = maker
     local settings = Window:Tab({ Title = "Session", Icon = "settings" })
     if Window.UIElements then
         Window.UIElements.SideBarContainer.Visible = true
@@ -1278,6 +1283,311 @@ local function build()
     end)
 end
 
+createScriptMaker = (function()
+return function(context)
+    local manager = { Records = {}, Selected = nil, Alive = true, NextId = 0 }
+    local changed = function() end
+    local scheduler = context.Task or task
+    local compiler = context.Compile or loadstring
+    local bindEnv = context.BindEnv or setfenv
+    local function output(record, level, ...)
+        local parts = {}
+        for i = 1, select('#', ...) do parts[i] = tostring(select(i, ...)) end
+        table.insert(record.Logs, level .. ' | ' .. table.concat(parts, '\t'))
+        if #record.Logs > 200 then table.remove(record.Logs, 1) end
+        changed()
+    end
+    local function belongs(record, owner)
+        local cursor = record
+        while cursor do
+            if cursor.Owner == owner.Id then return true end
+            cursor = manager.Records[cursor.Owner]
+        end
+        return false
+    end
+    function manager:Stop(id, status)
+        local record = assert(self.Records[id], 'Unknown script')
+        record.Generation = record.Generation + 1
+        record.Status = status or 'Disabled'
+        for _, child in pairs(self.Records) do
+            if child.Owner == id then self:Stop(child.Id, record.Status) end
+        end
+        for connection in pairs(record.Connections) do pcall(function() connection:Disconnect() end) end
+        record.Connections = {}
+        for thread in pairs(record.Threads) do
+            if thread ~= coroutine.running() and scheduler.cancel then
+                local ok, err = pcall(scheduler.cancel, thread)
+                if not ok then output(record, 'warning', 'Task cancellation failed: ' .. tostring(err)) end
+            end
+        end
+        record.Threads = {}
+        local callbacks = record.Cleanups
+        record.Cleanups = {}
+        for _, callback in ipairs(callbacks) do
+            local ok, err = pcall(callback)
+            if not ok then output(record, 'cleanup error', err) end
+        end
+        changed()
+    end
+    function manager:Create(name, role, owner, parent, source)
+        local count = 0; for _ in pairs(self.Records) do count = count + 1 end
+        assert(count < 64, 'Maximum 64 managed scripts')
+        if owner then assert(self.Records[owner] and self.Records[owner].Role == 'Controller', 'Choose a controller owner') end
+        self.NextId = self.NextId + 1
+        local instance = Instance.new('LocalScript')
+        instance.Name = name or ('LocalScript ' .. self.NextId)
+        instance.Disabled = true
+        instance.Parent = parent or context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui')
+        local record = { Id = self.NextId, Name = instance.Name, Role = role or 'Local', Owner = owner,
+            Instance = instance, Code = source or 'print("Hello from Paraware")\n', Status = 'Ready',
+            Generation = 0, Threads = {}, Connections = {}, Cleanups = {}, Logs = {} }
+        self.Records[record.Id] = record
+        self.Selected = record.Id
+        changed()
+        return record.Id
+    end
+    function manager:SetSource(id, code)
+        assert(#code <= 131072, 'Source exceeds 128 KB')
+        self.Records[id].Code = code
+    end
+    function manager:Check(id)
+        local record = assert(self.Records[id])
+        local fn, err = compiler(record.Code, '=Paraware/' .. record.Name)
+        record.Diagnostic = err
+        changed()
+        return fn, err
+    end
+    function manager:Run(id)
+        assert(self.Alive, 'Script Maker is unloaded')
+        local record = assert(self.Records[id], 'Unknown script')
+        local fn, err = self:Check(id)
+        if not fn then output(record, 'syntax error', err); return false, err end
+        if not bindEnv then
+            err = 'This executor does not support per-script environments (setfenv).'
+            output(record, 'error', err); return false, err
+        end
+        self:Stop(id, 'Restarting')
+        record.Status = 'Running'
+        local generation = record.Generation
+        local function active() return self.Alive and generation == record.Generation end
+        local function protect(callback, ...)
+            if not active() then return end
+            local args = table.pack(...)
+            local ok, message = xpcall(function() callback(table.unpack(args, 1, args.n)) end,
+                function(e) return debug and debug.traceback and debug.traceback(tostring(e), 2) or tostring(e) end)
+            if not ok and active() then record.Status = 'Error'; output(record, 'error', message) end
+            return ok
+        end
+        local function launch(method, seconds, callback, ...)
+            assert(type(callback) == 'function', 'Managed task expects a function')
+            local args = table.pack(...)
+            local thread
+            thread = coroutine.create(function()
+                protect(callback, table.unpack(args, 1, args.n))
+                record.Threads[thread] = nil
+                if active() and record.Status ~= 'Error' then
+                    record.Status = next(record.Threads) and 'Running' or (next(record.Connections) and 'Listening' or 'Completed')
+                end
+                changed()
+            end)
+            record.Threads[thread] = true
+            if method == 'delay' then scheduler.delay(seconds, thread) else scheduler[method](thread) end
+            return thread
+        end
+        local api = {}
+        local function child(idToControl)
+            local target = assert(self.Records[idToControl], 'Unknown child')
+            assert(record.Role == 'Controller' and belongs(target, record), 'Controllers can control their own descendants only')
+            return target
+        end
+        function api:CreateChild(options)
+            assert(active() and record.Role == 'Controller', 'Active controller required')
+            options = options or {}
+            local selection = manager.Selected
+            local id = manager:Create(options.Name, options.Role, record.Id, options.Parent or record.Instance, options.Source)
+            manager.Selected = selection; changed(); return id
+        end
+        function api:GetChildren()
+            local ids = {}; for key, value in pairs(manager.Records) do if value.Owner == record.Id then ids[#ids+1] = key end end
+            table.sort(ids); return ids
+        end
+        function api:Enable(childId) assert(active(), 'Controller stopped'); child(childId); return manager:Run(childId) end
+        api.Restart = api.Enable
+        function api:Disable(childId) assert(active(), 'Controller stopped'); child(childId); manager:Stop(childId, 'Disabled') end
+        function api:Kill(childId) assert(active(), 'Controller stopped'); child(childId); manager:Stop(childId, 'Killed') end
+        function api:IsEnabled() return active() end
+        function api:OnCleanup(callback) assert(active() and type(callback) == 'function'); table.insert(record.Cleanups, callback) end
+        function api:Connect(signal, callback)
+            assert(active(), 'Script stopped')
+            local connection = signal:Connect(function(...) protect(callback, ...) end)
+            record.Connections[connection] = true; return connection
+        end
+        local environment = setmetatable({ script = record.Instance, scriptHub = api,
+            print = function(...) output(record, 'output', ...) end,
+            warn = function(...) output(record, 'warning', ...) end,
+            task = {
+                spawn = function(cb, ...) return launch('spawn', nil, cb, ...) end,
+                defer = function(cb, ...) return launch('defer', nil, cb, ...) end,
+                delay = function(seconds, cb, ...) return launch('delay', seconds, cb, ...) end,
+                wait = function(seconds) local elapsed = scheduler.wait(seconds); if not active() then error('Managed script stopped', 0) end; return elapsed end,
+                cancel = function(thread) assert(record.Threads[thread], 'Task does not belong to this script'); scheduler.cancel(thread); record.Threads[thread] = nil end,
+            },
+        }, { __index = getfenv and getfenv(0) or _G })
+        local ok, bindError = pcall(bindEnv, fn, environment)
+        if not ok then record.Status = 'Error'; output(record, 'error', bindError); return false, bindError end
+        record.SourceWritable = pcall(function() record.Instance.Source = record.Code end)
+        launch('spawn', nil, fn)
+        changed()
+        return true
+    end
+    function manager:Delete(id)
+        self:Stop(id, 'Killed')
+        local children = {}; for key, value in pairs(self.Records) do if value.Owner == id then children[#children+1] = key end end
+        for _, childId in ipairs(children) do self:Delete(childId) end
+        self.Records[id].Instance:Destroy(); self.Records[id] = nil
+        if self.Selected == id then self.Selected = next(self.Records) end
+        changed()
+    end
+    function manager:Unload()
+        self.Alive = false
+        local ids = {}; for id in pairs(self.Records) do ids[#ids+1] = id end
+        for _, id in ipairs(ids) do if self.Records[id] then self:Delete(id) end end
+    end
+    if context.Headless then return manager end
+    local tab = context.Tab
+    local current, editor, gutter, console, diagnostic, picker, ownerPicker
+    local selecting, syncing = false, false
+    local location, customPath, chosenOwner = 'PlayerScripts', '', nil
+    local function selected() return manager.Records[manager.Selected] end
+    local function act(callback)
+        local ok, err = pcall(callback)
+        if not ok then context.Notify(tostring(err)) end
+    end
+    local function resolve()
+        if location == 'Character' then return assert(context.Player.Character, 'Character is unavailable') end
+        if location == 'Workspace' then return workspace end
+        if location == 'ReplicatedStorage' then return game:GetService('ReplicatedStorage') end
+        if location == 'Custom path' then
+            local node = game
+            for segment in customPath:gmatch('[^/]+') do
+                if segment ~= 'game' then node = assert(node:FindFirstChild(segment), 'Missing path segment: ' .. segment) end
+            end
+            assert(node ~= game, 'Enter a path such as Workspace/MyFolder'); return node
+        end
+        return assert(context.Player:FindFirstChild(location), location .. ' is unavailable')
+    end
+    local function label(record) return record.Id .. ' | ' .. record.Name end
+    tab:Paragraph({Title = 'Script Maker', Desc = 'Managed client scripts. Re-enable restarts from the beginning. Use scriptHub:Connect and task for cleanup. Native tight loops and untracked side effects cannot be stopped reliably.'})
+    picker = tab:Dropdown({Title = 'Open script', Values = {}, Callback = function(value)
+        if selecting then return end
+        local id = tonumber(tostring(value):match('^(%d+)'))
+        if manager.Records[id] then manager.Selected = id; current = nil; changed() end
+    end})
+    tab:Input({Title = 'Script name', Placeholder = 'LocalScript', Callback = function(value)
+        local record = selected(); if record and #value > 0 then record.Name = value:sub(1,80); record.Instance.Name = record.Name; changed() end
+    end})
+    tab:Dropdown({Title = 'Instance location', Values = {'PlayerScripts','PlayerGui','Character','Workspace','ReplicatedStorage','Custom path'}, Value = 'PlayerScripts', Callback = function(value) location = value end})
+    tab:Input({Title = 'Custom instance path', Placeholder = 'Workspace/MyFolder (exact names)', Callback = function(value) customPath = value end})
+    ownerPicker = tab:Dropdown({Title = 'Controller owner for new scripts', Values = {'None'}, Value = 'None', Callback = function(value) chosenOwner = tonumber(tostring(value):match('^(%d+)')) end})
+    tab:Button({Title = 'New LocalScript', Callback = function() act(function() manager:Create(nil, 'Local', chosenOwner, resolve()) end) end})
+    tab:Button({Title = 'New controller', Callback = function() act(function()
+        manager:Create('Controller', 'Controller', chosenOwner, resolve(), 'local children = scriptHub:GetChildren()\nif #children == 0 then\n    children[1] = scriptHub:CreateChild({\n        Name = "Child",\n        Source = [[print("Child running")]],\n    })\nend\nfor _, id in ipairs(children) do\n    scriptHub:Enable(id)\nend\n-- scriptHub:Disable(id), :Kill(id), :Restart(id)\n')
+    end) end})
+    tab:Button({Title = 'Move selected script', Callback = function() act(function() local record = assert(selected(), 'Select a script'); manager:Stop(record.Id); record.Instance.Parent = resolve(); changed() end) end})
+    local function ui(class, properties, parent)
+        local item = Instance.new(class); for key, value in pairs(properties) do item[key] = value end; item.Parent = parent; return item
+    end
+    local container = tab.ContainerFrame
+    if container then
+        local frame = ui('Frame', {Name='ParawareScriptEditor', Size=UDim2.new(1,0,0,582), BackgroundColor3=Color3.fromRGB(10,10,12), BorderSizePixel=0}, container)
+        for index, action in ipairs({{'Run', function() manager:Run(manager.Selected) end}, {'Disable', function() manager:Stop(manager.Selected,'Disabled') end}, {'Kill', function() manager:Stop(manager.Selected,'Killed') end}}) do
+            local callback = action[2]
+            local button = ui('TextButton', {Position=UDim2.new((index-1)/3,8,0,8), Size=UDim2.new(1/3,-16,0,30), BackgroundColor3=Color3.fromRGB(38,38,44), Text=action[1], TextColor3=Color3.fromRGB(240,240,245), Font=Enum.Font.Code, TextSize=13}, frame)
+            context.Connect(button.MouseButton1Click, function() act(callback) end)
+        end
+        diagnostic = ui('TextLabel', {Size=UDim2.new(1,-16,0,38), Position=UDim2.fromOffset(8,44), BackgroundTransparency=1, Text='Ready', TextColor3=Color3.fromRGB(220,220,225), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left}, frame)
+        local scroll = ui('ScrollingFrame', {Size=UDim2.new(1,-16,0,320), Position=UDim2.fromOffset(8,86), BackgroundColor3=Color3.fromRGB(7,7,9), BorderSizePixel=0, ScrollBarThickness=5, AutomaticCanvasSize=Enum.AutomaticSize.XY, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        gutter = ui('TextLabel', {Size=UDim2.fromOffset(42,320), BackgroundTransparency=1, Text='1', TextColor3=Color3.fromRGB(138,138,145), Font=Enum.Font.Code, TextSize=14, TextXAlignment=Enum.TextXAlignment.Right, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
+        editor = ui('TextBox', {Name='Source', Position=UDim2.fromOffset(52,0), Size=UDim2.new(1,-60,0,320), AutomaticSize=Enum.AutomaticSize.XY, BackgroundTransparency=1, Text='', TextColor3=Color3.fromRGB(235,235,240), Font=Enum.Font.Code, TextSize=14, MultiLine=true, ClearTextOnFocus=false, TextWrapped=false, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
+        local suggestions = ui('TextButton', {Position=UDim2.fromOffset(8,414), Size=UDim2.new(1,-16,0,30), BackgroundColor3=Color3.fromRGB(32,32,38), Text='Suggestions appear as you type', TextColor3=Color3.fromRGB(210,210,220), Font=Enum.Font.Code, TextSize=12}, frame)
+        local candidates = {'local','function','return','script','scriptHub','print','warn','task.spawn','task.wait','task.delay','game:GetService','Instance.new','Vector3.new','CFrame.new','Enum','workspace','scriptHub:CreateChild','scriptHub:Enable','scriptHub:Disable','scriptHub:Kill','scriptHub:Connect','scriptHub:OnCleanup'}
+        local completion, prefix = nil, ''
+        local function updateCode()
+            if syncing or not selected() then return end
+            local record = selected()
+            if #editor.Text > 131072 then diagnostic.Text = 'Source exceeds 128 KB'; return end
+            manager:SetSource(record.Id, editor.Text)
+            local lines = {'1'}; for _ in editor.Text:gmatch('\n') do lines[#lines+1] = tostring(#lines+1) end
+            gutter.Text = table.concat(lines, '\n'); gutter.Size = UDim2.fromOffset(42, math.max(320,#lines*17))
+            local cursor = editor.CursorPosition
+            local before = cursor and cursor > 0 and editor.Text:sub(1,cursor-1) or ''
+            prefix = before:match('([%w_:.]+)$') or ''; completion = nil
+            if #prefix > 0 then for _, word in ipairs(candidates) do if word:sub(1,#prefix)==prefix and word~=prefix then completion=word; break end end end
+            suggestions.Text = completion and ('Insert suggestion: ' .. completion) or 'No suggestion (click or Tab to insert)'
+            local code, id = record.Code, record.Id
+            scheduler.delay(0.5, function()
+                if manager.Alive and manager.Selected==id and manager.Records[id].Code==code then manager:Check(id) end
+            end)
+        end
+        local function accept()
+            if not completion or not selected() then return end
+            local cursor = editor.CursorPosition; if not cursor or cursor < 1 then return end
+            local value = editor.Text:sub(1,cursor-1-#prefix) .. completion .. editor.Text:sub(cursor)
+            local nextCursor = cursor-#prefix+#completion
+            editor.Text=value; editor.CursorPosition=nextCursor; updateCode(); editor:CaptureFocus()
+        end
+        context.Connect(editor:GetPropertyChangedSignal('Text'), updateCode)
+        context.Connect(editor:GetPropertyChangedSignal('CursorPosition'), updateCode)
+        context.Connect(suggestions.MouseButton1Click, accept)
+        context.Connect(context.Input.InputBegan, function(key)
+            if context.Input:GetFocusedTextBox() ~= editor then return end
+            if key.KeyCode==Enum.KeyCode.Tab then accept() end
+            if key.KeyCode==Enum.KeyCode.Return and (context.Input:IsKeyDown(Enum.KeyCode.LeftControl) or context.Input:IsKeyDown(Enum.KeyCode.RightControl)) then act(function() manager:Run(manager.Selected) end) end
+        end)
+        local outputScroll = ui('ScrollingFrame', {Position=UDim2.fromOffset(8,454), Size=UDim2.new(1,-16,0,118), BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        console = ui('TextLabel', {Size=UDim2.new(1,-8,0,118), AutomaticSize=Enum.AutomaticSize.Y, BackgroundTransparency=1, Text='No output yet.', TextColor3=Color3.fromRGB(210,210,218), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, outputScroll)
+    else
+        tab:Paragraph({Title='Editor unavailable', Desc='WindUI did not expose its tab container.'})
+    end
+    local status = tab:Paragraph({Title='Script status', Desc='Create a script to begin.'})
+    changed = function()
+        if not manager.Alive then return end
+        local names, owners = {}, {'None'}
+        for _, record in pairs(manager.Records) do names[#names+1]=label(record); if record.Role=='Controller' then owners[#owners+1]=label(record) end end
+        table.sort(names); selecting=true; picker:Refresh(names); ownerPicker:Refresh(owners); selecting=false
+        local record = selected(); if not record then return end
+        if editor and current~=record.Id then syncing=true; editor.Text=record.Code; editor.CursorPosition=1; current=record.Id; syncing=false
+            local lines={'1'}; for _ in record.Code:gmatch('\n') do lines[#lines+1]=tostring(#lines+1) end; gutter.Text=table.concat(lines,'\n')
+        end
+        local threads, connections = 0,0; for _ in pairs(record.Threads) do threads=threads+1 end; for c in pairs(record.Connections) do if c.Connected then connections=connections+1 end end
+        status:SetDesc(record.Name .. ' | ' .. record.Role .. ' | ' .. record.Status .. '\nTasks: ' .. threads .. ' | Connections: ' .. connections .. '\nOwner: ' .. tostring(record.Owner or 'None') .. '\nLocation: ' .. record.Instance:GetFullName() .. '\nExecution: executor-managed; engine LocalScript stays disabled.')
+        if diagnostic then diagnostic.Text=record.Diagnostic or ('No syntax errors | ' .. record.Status) end
+        if console then local recent={}; for i=1,#record.Logs do recent[#recent+1]=record.Logs[i] end; console.Text=#recent>0 and table.concat(recent,'\n') or 'No output yet.' end
+    end
+    local actions = {
+        {'Run / restart', function(id) manager:Run(id) end},
+        {'Check syntax', function(id) local _, err=manager:Check(id); output(manager.Records[id], err and 'syntax error' or 'check', err or 'Syntax OK') end},
+        {'Disable script', function(id) manager:Stop(id,'Disabled') end},
+        {'Re-enable script', function(id) manager:Run(id) end},
+        {'Kill script', function(id) manager:Stop(id,'Killed') end},
+        {'Clear script output', function(id) manager.Records[id].Logs={}; changed() end},
+        {'Copy full script output', function(id) assert(setclipboard,'Clipboard unsupported'); setclipboard(table.concat(manager.Records[id].Logs,'\n')) end},
+        {'Save source .luau', function(id)
+            assert(writefile,'File writing unsupported'); if makefolder then pcall(makefolder,'Paraware-Scripts') end
+            local record=manager.Records[id]; local path='Paraware-Scripts/' .. record.Name:gsub('[^%w_-]','_') .. '-' .. id .. '.luau'
+            writefile(path,record.Code); output(record,'saved',path)
+        end},
+        {'Delete selected script', function(id) manager:Delete(id) end},
+    }
+    for _, action in ipairs(actions) do
+        local callback=action[2]
+        tab:Button({Title=action[1], Callback=function() act(function() callback(assert(manager.Selected,'Create a script first')) end) end})
+    end
+    manager:Create('LocalScript', 'Local', nil, context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui'))
+    return manager
+end
+
+end)()
 embeddedLogo = [[
 iVBORw0KGgoAAAANSUhEUgAABOYAAATmCAYAAACF/K4qAAAAAXNSR0IArs4c6QAAAERlWElmTU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAAB
 AAEAAKACAAQAAAABAAAE5qADAAQAAAABAAAE5gAAAAAaFPOMAABAAElEQVR4AezdW4xl2XkY5rpXV3dP91w45PBmMyIl2kOaBGVbYYTIHkUSEiuWBMUhX6RI
