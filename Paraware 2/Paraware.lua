@@ -1844,7 +1844,7 @@ return function(context)
             attempts=attempts+1;self.Busy=true
             local ok,ready=pcall(self.CheckBrowserReply,self)
             self.Busy=false
-            if not self.Alive or self.PendingRequest~=requestId then status('Reply received');render();return end
+            if not self.Alive or self.PendingRequest~=requestId then status(self.BrowserStatus or 'Reply received');render();return end
             if not ok then self.BrowserStatus=tostring(ready) end
             status(self.BrowserStatus or 'ChatGPT is answering...');render()
             if attempts<450 then scheduler.delay(2,poll) else self.BrowserStatus='Automatic wait paused. Check the extension or press Check reply.';status(self.BrowserStatus) end
@@ -1854,7 +1854,9 @@ return function(context)
     function chat:CheckBrowserReply()
         assert(self.PendingRequest, 'No browser reply is pending')
         local result=call('GET','/browser/result/'..self.PendingRequest)
-        if result.ready then
+        if result.cancelled then
+            self.PendingRequest=nil;self.BrowserStatus=result.status;status(result.status);render()
+        elseif result.ready then
             self.ChatId=result.chat.id;self.Messages=result.chat.messages;self.Drafts=result.drafts or {};self.PendingRequest=nil;render()
         else
             self.BrowserStatus=result.status
@@ -1864,6 +1866,7 @@ return function(context)
     function chat:SetContext(enabled, selectedSource) includeContext=enabled;includeSource=selectedSource end
     function chat:New()
         assert(not self.Busy,'Wait for the current request to finish')
+        if self.PendingRequest then call('POST','/browser/cancel',{requestId=self.PendingRequest}) end
         self.ChatId=nil;self.Messages={};self.Drafts={};self.PendingRequest=nil;render()
     end
     function chat:Load(id)
@@ -1961,7 +1964,7 @@ return function(context)
                 end
             end)
         end
-        button('New chat',UDim2.new(1,-212,0,8),UDim2.fromOffset(92,30),root,function() if chat.Busy then return end;chat:New();status('New conversation') end)
+        button('New chat',UDim2.new(1,-212,0,8),UDim2.fromOffset(92,30),root,function() if chat.Busy then return end;local ok,err=pcall(chat.New,chat);status(ok and 'New conversation' or tostring(err)) end)
         local settingsButton
         settings.Parent=root;settings.Position=UDim2.fromOffset(8,46);settings.AnchorPoint=Vector2.new(0,0);settings.Size=UDim2.new(1,-16,1,-54);settings.Visible=false;settings.ClipsDescendants=true
         settingsButton=button('Settings',UDim2.new(1,-106,0,8),UDim2.fromOffset(96,30),root,function() settings.Visible=not settings.Visible;body.Visible=not settings.Visible;settingsButton.Text=settings.Visible and 'Chat' or 'Settings' end)
