@@ -1565,16 +1565,19 @@ return function(context)
     local function ui(class, properties, parent)
         local item = Instance.new(class); for key, value in pairs(properties) do item[key] = value end; item.Parent = parent; return item
     end
-    local container = tab.ContainerFrame
+    local viewport = tab.ContainerFrame
+    local container = tab.UIElements and tab.UIElements.ContainerFrame
+    if viewport then viewport.ClipsDescendants = true end
     if container then
-        local frame = ui('Frame', {Name='ParawareScriptEditor', Size=UDim2.new(1,0,0,582), BackgroundColor3=Color3.fromRGB(10,10,12), BorderSizePixel=0}, container)
+        container.ClipsDescendants = true
+        local frame = ui('Frame', {Name='ParawareScriptEditor', ClipsDescendants=true, Size=UDim2.new(1,0,0,582), BackgroundColor3=Color3.fromRGB(10,10,12), BorderSizePixel=0}, container)
         for index, action in ipairs({{'Run', function() manager:Run(manager.Selected) end}, {'Disable', function() manager:Stop(manager.Selected,'Disabled') end}, {'Kill', function() manager:Stop(manager.Selected,'Killed') end}}) do
             local callback = action[2]
             local button = ui('TextButton', {Position=UDim2.new((index-1)/3,8,0,8), Size=UDim2.new(1/3,-16,0,30), BackgroundColor3=Color3.fromRGB(38,38,44), Text=action[1], TextColor3=Color3.fromRGB(240,240,245), Font=Enum.Font.Code, TextSize=13}, frame)
             context.Connect(button.MouseButton1Click, function() act(callback) end)
         end
         diagnostic = ui('TextLabel', {Size=UDim2.new(1,-16,0,38), Position=UDim2.fromOffset(8,44), BackgroundTransparency=1, Text='Ready', TextColor3=Color3.fromRGB(220,220,225), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left}, frame)
-        local scroll = ui('ScrollingFrame', {Size=UDim2.new(1,-16,0,320), Position=UDim2.fromOffset(8,86), BackgroundColor3=Color3.fromRGB(7,7,9), BorderSizePixel=0, ScrollBarThickness=5, AutomaticCanvasSize=Enum.AutomaticSize.XY, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        local scroll = ui('ScrollingFrame', {ClipsDescendants=true, Size=UDim2.new(1,-16,0,320), Position=UDim2.fromOffset(8,86), BackgroundColor3=Color3.fromRGB(7,7,9), BorderSizePixel=0, ScrollBarThickness=5, AutomaticCanvasSize=Enum.AutomaticSize.XY, CanvasSize=UDim2.fromOffset(0,0)}, frame)
         gutter = ui('TextLabel', {Size=UDim2.fromOffset(42,320), BackgroundTransparency=1, Text='1', TextColor3=Color3.fromRGB(138,138,145), Font=Enum.Font.Code, TextSize=14, TextXAlignment=Enum.TextXAlignment.Right, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
         editor = ui('TextBox', {Name='Source', Position=UDim2.fromOffset(52,0), Size=UDim2.new(1,-60,0,320), AutomaticSize=Enum.AutomaticSize.XY, BackgroundTransparency=1, Text='', TextColor3=Color3.fromRGB(235,235,240), Font=Enum.Font.Code, TextSize=14, MultiLine=true, ClearTextOnFocus=false, TextWrapped=false, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, scroll)
         local suggestions = ui('TextButton', {Position=UDim2.fromOffset(8,414), Size=UDim2.new(1,-16,0,30), BackgroundColor3=Color3.fromRGB(32,32,38), Text='Suggestions appear as you type', TextColor3=Color3.fromRGB(210,210,220), Font=Enum.Font.Code, TextSize=12}, frame)
@@ -1612,7 +1615,7 @@ return function(context)
             if key.KeyCode==Enum.KeyCode.Tab then accept() end
             if key.KeyCode==Enum.KeyCode.Return and (context.Input:IsKeyDown(Enum.KeyCode.LeftControl) or context.Input:IsKeyDown(Enum.KeyCode.RightControl)) then act(function() manager:Run(manager.Selected) end) end
         end)
-        local outputScroll = ui('ScrollingFrame', {Position=UDim2.fromOffset(8,454), Size=UDim2.new(1,-16,0,118), BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, frame)
+        local outputScroll = ui('ScrollingFrame', {ClipsDescendants=true, Position=UDim2.fromOffset(8,454), Size=UDim2.new(1,-16,0,118), BackgroundTransparency=1, BorderSizePixel=0, ScrollBarThickness=4, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, frame)
         console = ui('TextLabel', {Size=UDim2.new(1,-8,0,118), AutomaticSize=Enum.AutomaticSize.Y, BackgroundTransparency=1, Text='No output yet.', TextColor3=Color3.fromRGB(210,210,218), Font=Enum.Font.Code, TextSize=12, TextWrapped=true, TextXAlignment=Enum.TextXAlignment.Left, TextYAlignment=Enum.TextYAlignment.Top}, outputScroll)
     else
         tab:Paragraph({Title='Editor unavailable', Desc='WindUI did not expose its tab container.'})
