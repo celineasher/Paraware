@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.1.0",
+    Version = "1.2.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -686,7 +686,7 @@ local function scanSounds()
         local entries, values, unique, empty, preserved = {}, {}, {}, 0, nil
         if ok then
             for _, object in ipairs(objects) do
-                if object ~= soundPreview and (object:IsA("Sound") or object:IsA("AudioPlayer")) then
+                if object ~= soundPreview and not (Session.Sounds and Session.Sounds:IsOwned(object)) and (object:IsA("Sound") or object:IsA("AudioPlayer")) then
                     local readable, content = pcall(function() return object:IsA("Sound") and object.SoundId or object.Asset end)
                     if readable and type(content) == "string" and content ~= "" then
                         if #values >= 2000 then break end
@@ -1009,6 +1009,9 @@ local function build()
     })
     Window:OnDestroy(cleanup)
     createHubExtras.DecorateHeader(Window, Config.Version, connect)
+    Session.Sounds = createHubExtras.CreateSounds({ Window = Window, Preferences = preferences,
+        Session = Session, Connect = connect, Log = log,
+        OnCleanup = function(fn) table.insert(cleanups, fn) end })
 
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
@@ -1285,8 +1288,10 @@ end
 createHubExtras = (function()
 local Extras = {}
 local settingsFile = "Paraware-settings.json"
-local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F" }
+local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35 }
 local history = {
+    { Version = "1.2.0", Date = "2026-10-03", Title = "Interface sounds",
+      Changes = "Added startup/reopen and button-click sounds.\nAdded saved sound toggle and volume, with a preview button.\nInterface sounds stay out of the sound exporter and stop on unload." },
     { Version = "1.1.0", Date = "2026-10-03", Title = "Settings and separate game modules",
       Changes = "Added saved appearance and shortcut settings.\nAdded version history and the current version in the window header.\nSupported games get a dedicated tab from a separate GitHub script.\nPlace matching takes priority over universe matching; failed modules leave universal tools available." },
     { Version = "1.0.0", Date = "2026-10-03", Title = "Standalone hub baseline",
@@ -1306,6 +1311,7 @@ function Extras.LoadSettings()
             end
         end
     end
+    values.SoundVolume = math.clamp(values.SoundVolume == values.SoundVolume and values.SoundVolume or 0.35, 0, 1)
     local valid = { RightShift = true, LeftAlt = true, F4 = true, F = true, G = true, H = true }
     if not valid[values.ToggleKey] or values.ToggleKey == "F" or values.ToggleKey == "G" or values.ToggleKey == "H" then values.ToggleKey = defaults.ToggleKey end
     if values.FlyKey ~= "F" and values.FlyKey ~= "G" and values.FlyKey ~= "H" then values.FlyKey = defaults.FlyKey end
@@ -1321,6 +1327,59 @@ function Extras.Resolve(registry, placeId, universeId)
     assert(type(entry) == "table" and type(entry.name) == "string" and #entry.name > 0 and #entry.name <= 80, "Invalid game name")
     assert(type(entry.file) == "string" and entry.file:match("^[%w_/-]+%.lua$") and not entry.file:find("..", 1, true) and entry.file:sub(1, 1) ~= "/", "Invalid game module path")
     return entry
+end
+function Extras.CreateSounds(ctx)
+    local prefs, sounds = ctx.Preferences, {}
+    local lastOpen, lastClick = -math.huge, -math.huge
+    local function make(name, asset)
+        local sound = Instance.new("Sound")
+        sound.Name, sound.SoundId = name, "rbxassetid://" .. asset
+        sound.Volume, sound.Looped = prefs.SoundVolume, false
+        sound.Parent = game:GetService("SoundService")
+        return sound
+    end
+    local open = make("ParawareOpenSFX", "80994273424452")
+    local click = make("ParawareClickSFX", "86313632275410")
+    local function play(sound)
+        if not ctx.Session.Alive or not prefs.Sounds or prefs.SoundVolume <= 0 then return end
+        local ok, err = pcall(function()
+            sound.Volume = prefs.SoundVolume
+            sound.TimePosition = 0
+            sound:Play()
+        end)
+        if not ok then ctx.Log("Interface sound unavailable: " .. tostring(err)) end
+    end
+    function sounds:Open()
+        local now = os.clock()
+        if now - lastOpen < 0.5 then return end
+        lastOpen = now; play(open)
+    end
+    function sounds:Click()
+        local now = os.clock()
+        if now - lastClick < 0.035 then return end
+        lastClick = now; play(click)
+    end
+    function sounds:IsOwned(object) return object == open or object == click end
+    function sounds:Update()
+        open.Volume, click.Volume = prefs.SoundVolume, prefs.SoundVolume
+        if not prefs.Sounds or prefs.SoundVolume <= 0 then open:Stop(); click:Stop() end
+    end
+    ctx.OnCleanup(function() open:Stop(); click:Stop(); open:Destroy(); click:Destroy() end)
+    ctx.Window:OnOpen(function() sounds:Open() end)
+    local root = ctx.Window.UIElements and ctx.Window.UIElements.Main
+    local surface = root and root.FindFirstAncestorOfClass and (root:FindFirstAncestorOfClass("ScreenGui") or root)
+    local bound = setmetatable({}, { __mode = "k" })
+    local function bind(object)
+        if bound[object] or not object:IsA("GuiButton") then return end
+        bound[object] = true
+        ctx.Connect(object.Activated, function() sounds:Click() end)
+    end
+    if surface then
+        for _, object in ipairs(surface:GetDescendants()) do bind(object) end
+        ctx.Connect(surface.DescendantAdded, bind)
+    end
+    sounds:Open()
+    return sounds
 end
 function Extras.DecorateHeader(window, version, connect)
     local root = window.UIElements and window.UIElements.Main
@@ -1389,6 +1448,20 @@ function Extras.Build(ctx)
     end })
     appearance:Toggle({ Title = "Background blur", Desc = "Turn off for clearer gameplay or lower graphics overhead.", Value = prefs.Blur, Callback = function(value)
         prefs.Blur = value; ctx.WindUI:ToggleAcrylic(value); save()
+    end })
+    local audio = settings:Section({ Title = "Interface sounds", Opened = true, Box = true })
+    audio:Toggle({ Title = "Enable interface sounds", Desc = "Startup, reopening the window, and button clicks.", Value = prefs.Sounds, Callback = function(value)
+        prefs.Sounds = value; ctx.Session.Sounds:Update(); save()
+    end })
+    audio:Slider({ Title = "Interface volume", Desc = "Only changes Paraware's interface sounds.", Step = 1, IsTextbox = true,
+        Value = { Min = 0, Max = 100, Default = math.floor(prefs.SoundVolume * 100) }, Callback = function(value)
+            local volume = tonumber(value)
+            if not volume or volume ~= volume then return end
+            prefs.SoundVolume = math.clamp(volume / 100, 0, 1); ctx.Session.Sounds:Update(); save()
+        end })
+    audio:Button({ Title = "Preview opening sound", Callback = function()
+        if not prefs.Sounds or prefs.SoundVolume == 0 then ctx.Notify("Enable interface sounds and raise the volume to preview."); return end
+        ctx.Session.Sounds:Open()
     end })
     local shortcuts = settings:Section({ Title = "Shortcuts", Opened = true, Box = true })
     shortcuts:Dropdown({ Title = "Show / hide key", Values = { "RightShift", "LeftAlt", "F4" }, Value = prefs.ToggleKey, Callback = function(value)
