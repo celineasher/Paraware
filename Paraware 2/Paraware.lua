@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.4.0",
+    Version = "1.5.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -14,6 +14,7 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local createObjectPicker
 local createHubExtras
 local preferences
 local createScriptMaker
@@ -55,7 +56,7 @@ local state = {
     Fly = false, FlySpeed = 50, Altitude = "Level",
     InfiniteJump = false, Noclip = false,
     FovEnabled = false, Fov = 80, Fullbright = false,
-    Picker = false, PickMode = "Nearest model", PickDistance = 5000, SkipInvisible = true,
+    Picker = false, PickMode = "Smart model", PickDistance = 5000, SkipInvisible = true, PickLayer = 1, PickAssist = true,
 }
 local character, humanoid, root, baseline, flight
 local collisions, cameraDefaults = {}, {}
@@ -68,7 +69,7 @@ local exportCounter = 0
 local lastExportPath
 local selected, selectionHighlights = {}, {}
 local selectionStyle = { Fill = Color3.fromHex("#FF3B30"), Outline = Color3.fromHex("#FF3B30"), Opacity = 0.28 }
-local pickerTarget, lastHoverTarget
+local pickerTarget, lastHoverTarget, lastHoverLayer
 local selectionSummary
 local selectedDropdown, selectedDetails, selectedEntries, selectionChoice, historyStatus
 local exportLayout, customFilename, cancelExport = "Together", "", false
@@ -505,39 +506,7 @@ local function collectGameUI()
 end
 
 local function pickObject(position)
-    if overHub(position) then return nil end
-    local camera = workspace.CurrentCamera
-    if not camera then return nil end
-    local inset = GuiService:GetGuiInset()
-    local ray = camera:ViewportPointToRay(position.X - inset.X, position.Y - inset.Y)
-    local params = RaycastParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    local excluded = {}
-    if Player.Character then excluded[#excluded + 1] = Player.Character end
-    if vfxPreview and vfxPreview.Model then excluded[#excluded + 1] = vfxPreview.Model end
-    params.IgnoreWater = true
-    local target
-    -- Invisible trigger volumes often sit in front of the actual model.
-    for _ = 1, 16 do
-        params.FilterDescendantsInstances = excluded
-        local hit = workspace:Raycast(ray.Origin, ray.Direction * state.PickDistance, params)
-        if not hit or hit.Instance:IsA("Terrain") then return nil end
-        local part = hit.Instance
-        if not part:IsA("BasePart") then return nil end
-        local invisible = (part.Transparency or 0) >= 0.98 or (part.LocalTransparencyModifier or 0) >= 0.98
-        if state.SkipInvisible and invisible then excluded[#excluded + 1] = part else target = part; break end
-    end
-    if not target then return nil end
-    if state.PickMode == "Nearest model" then
-        target = target:FindFirstAncestorOfClass("Model") or target
-    elseif state.PickMode == "Outer model" then
-        local ancestor = target.Parent
-        while ancestor and ancestor ~= workspace do
-            if ancestor:IsA("Model") then target = ancestor end
-            ancestor = ancestor.Parent
-        end
-    end
-    return target
+    return Session.PickObject(position)
 end
 
 local function isUI(target)
@@ -1155,19 +1124,21 @@ local function build()
     assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models or parts. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
     toggle(assets, "Picker", "Object picker", "Click to add or remove a target. Selecting does not save a file.", function(value)
         state.Picker = value
-        lastHoverTarget = nil
+        state.PickLayer = 1
+        lastHoverTarget, lastHoverLayer = nil, nil
         if pickerTarget then pickerTarget:SetDesc(value and "Move the cursor over a loaded object to preview its target." or "Enable Object picker to preview the exact target before clicking.") end
         if not value and pickerHighlight then pickerHighlight.Adornee = nil end
         exportMessage(value and "Picker ready" or "Picker off", value and "Click targets outside the hub, then Export selected." or "Selection is kept. You can still export or clear it.")
         log("Object picker " .. tostring(value))
     end)
-    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Nearest model", "Outer model", "Clicked part" }, Value = state.PickMode,
-        Callback = function(value) state.PickMode = value end })
+    local selectionMode = assets:Dropdown({ Title = "Selection", Values = { "Smart model", "Nearest model", "Outer model", "Clicked part" }, Value = state.PickMode,
+        Callback = function(value) state.PickMode = value; state.PickLayer = 1 end })
     pickerTarget = assets:Paragraph({ Title = "Under cursor", Desc = "Enable Object picker to preview the exact target before clicking." })
     local detection = assets:Section({ Title = "Picker detection", Icon = "scan", Opened = false, Box = true })
+    detection:Toggle({ Title = "Small target assist", Desc = "Check within 3 pixels only when the center ray misses. Never replaces a center hit.", Value = true, Callback = function(value) state.PickAssist = value end })
     detection:Toggle({ Title = "Skip invisible parts", Desc = "Pick through invisible trigger volumes. Turn off to select those parts themselves.", Value = true, Callback = function(value) state.SkipInvisible = value end })
     slider(detection, "Pick distance", "Maximum distance in studs. Only objects loaded on your client can be detected.", 100, 10000, 5000, function(value) state.PickDistance = value end)
-    detection:Paragraph({ Title = "Model selection", Desc = "Nearest model selects the closest model ancestor; Outer model includes nested models in the outer assembly; Clicked part selects only the hit part. Your character and the local VFX preview are ignored." })
+    detection:Paragraph({ Title = "Model selection", Desc = "Smart model avoids containers over 120 studs or 200 parts, selecting the hit part instead. Nearest/Outer model are manual overrides. While picking: Tab cycles hits behind the front object; R returns to the front. Moving the cursor resets to the front." })
     local colors = assets:Section({ Title = "Selection appearance", Icon = "palette", Opened = false, Box = true })
     colors:Colorpicker({ Title = "Selection fill", Value = selectionStyle.Fill, Callback = function(color) selectionStyle.Fill = color; updateSelectionStyle() end })
     colors:Colorpicker({ Title = "Selection outline", Value = selectionStyle.Outline, Callback = function(color) selectionStyle.Outline = color; updateSelectionStyle() end })
@@ -1205,8 +1176,8 @@ local function build()
     end })
     local models = assets:Section({ Title = "Model export", Icon = "box", Opened = false, Box = true })
     models:Button({ Title = "Pick models", Callback = function()
-        state.Picker, state.PickMode = true, "Nearest model"
-        selectionMode:Select("Nearest model")
+        state.Picker, state.PickMode = true, "Smart model"
+        selectionMode:Select("Smart model")
         toggles.Picker:Set(true, false)
         exportMessage("Model picker ready", "Click models to add/remove them. Export models only saves the model/part targets in your selection.")
     end })
@@ -1329,11 +1300,108 @@ local function build()
     end)
 end
 
+createObjectPicker = (function()
+return function(ctx)
+    local state = ctx.State
+    local modelCache = setmetatable({}, { __mode = "k" })
+    local lastPosition
+    local function safeModel(model)
+        local cached = modelCache[model]
+        if cached and os.clock() - cached.Time < 1 then return cached.Safe end
+        local safe, count, queue = true, 0, { model }
+        local index = 1
+        while index <= #queue and safe do
+            local object = queue[index]; index = index + 1
+            for _, child in ipairs(object:GetChildren()) do
+                if child:IsA("BasePart") then count = count + 1 end
+                queue[#queue + 1] = child
+                if count > 200 or #queue > 600 then safe = false; break end
+            end
+        end
+        if safe and model.GetBoundingBox then
+            local ok, _, size = pcall(model.GetBoundingBox, model)
+            safe = ok and size ~= nil and math.max(size.X, size.Y, size.Z) <= 120
+        end
+        modelCache[model] = { Time = os.clock(), Safe = safe }
+        return safe
+    end
+    local function resolve(part)
+        if state.PickMode == "Smart model" then
+            local model = part:FindFirstAncestorOfClass("Model")
+            return model and safeModel(model) and model or part
+        elseif state.PickMode == "Nearest model" then
+            return part:FindFirstAncestorOfClass("Model") or part
+        elseif state.PickMode == "Outer model" then
+            local target, parent = part, part.Parent
+            while parent and parent ~= workspace do
+                if parent:IsA("Model") then target = parent end
+                parent = parent.Parent
+            end
+            return target
+        end
+        return part
+    end
+    local function cast(camera, x, y)
+        -- Mouse/touch positions are viewport coordinates; do not subtract the top-bar inset.
+        local ray = camera:ViewportPointToRay(x, y)
+        local params = RaycastParams.new()
+        params.FilterType = Enum.RaycastFilterType.Exclude
+        params.IgnoreWater, params.RespectCanCollide = true, false
+        local excluded = {}
+        if ctx.Player.Character then excluded[#excluded + 1] = ctx.Player.Character end
+        local preview = ctx.Preview()
+        if preview then excluded[#excluded + 1] = preview end
+        local seen, layer = {}, 0
+        for _ = 1, 32 do
+            params.FilterDescendantsInstances = excluded
+            local hit = workspace:Raycast(ray.Origin, ray.Direction * state.PickDistance, params)
+            if not hit then return nil, false end
+            local part = hit.Instance
+            if part:IsA("Terrain") then return nil, true end
+            if not part:IsA("BasePart") then return nil, true end
+            local transparency = 1 - (1 - (part.Transparency or 0)) * (1 - (part.LocalTransparencyModifier or 0))
+            if state.SkipInvisible and transparency >= 0.999 then
+                excluded[#excluded + 1] = part
+            else
+                local target = resolve(part)
+                if not seen[target] then
+                    seen[target] = true; layer = layer + 1
+                    if layer == state.PickLayer then return target, true end
+                end
+                excluded[#excluded + 1] = target
+            end
+        end
+        return nil, true
+    end
+    return function(position)
+        if ctx.OverHub(position) then return nil end
+        local camera = workspace.CurrentCamera
+        if not camera then return nil end
+        if not lastPosition then
+            lastPosition = { X = position.X, Y = position.Y }
+        elseif ((position.X - lastPosition.X)^2 + (position.Y - lastPosition.Y)^2) > 100 then
+            state.PickLayer = 1
+            lastPosition = { X = position.X, Y = position.Y }
+        end
+        local target, blocked = cast(camera, position.X, position.Y)
+        if target or blocked or not state.PickAssist or state.PickLayer ~= 1 then return target end
+        -- Offset rays never replace a valid center hit or pick around terrain.
+        for _, offset in ipairs({ { 3, 0 }, { -3, 0 }, { 0, 3 }, { 0, -3 } }) do
+            local nearby = cast(camera, position.X + offset[1], position.Y + offset[2])
+            if nearby then return nearby end
+        end
+        return nil
+    end
+end
+
+end)()
 createHubExtras = (function()
 local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.5.0", Date = "2026-10-04", Title = "Picker accuracy fixes",
+      Changes = "Fixed cursor/top-bar coordinate mismatch and unified hover/click positions.\nSmart model avoids large map containers.\nAdded small-target assist on center misses and keyboard hit-layer cycling." },
     { Version = "1.4.0", Date = "2026-10-04", Title = "Export selection improvements",
       Changes = "Red selection fill and outline by default, with live color and opacity controls.\nAdded Clear all and a target-under-cursor preview.\nPicker skips invisible triggers and local VFX previews, with adjustable range and nested-model selection." },
     { Version = "1.3.0", Date = "2026-10-03", Title = "Smoother interface motion",
@@ -8508,6 +8576,8 @@ BAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECA
 BAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAAECBAgQIECAAGdrxgYAAAAcSURBVAECBAgQIECAAAECBAgQIECAAAECIwn8AEf6
 u+6vpl2xAAAAAElFTkSuQmCC
 ]]
+Session.PickObject = createObjectPicker({ State = state, Player = Player, OverHub = overHub,
+    Preview = function() return vfxPreview and vfxPreview.Model end })
 preferences = createHubExtras.LoadSettings()
 Config.ToggleKey = Enum.KeyCode[preferences.ToggleKey] or Config.ToggleKey
 Config.FlyKey = Enum.KeyCode[preferences.FlyKey] or Config.FlyKey
@@ -8530,11 +8600,21 @@ if Player.Character then task.spawn(bindCharacter, Player.Character) end
 connect(Input.InputBegan, function(input, processed)
     if state.Picker and input.UserInputType == Enum.UserInputType.MouseButton1 then
         if processed or Input:GetFocusedTextBox() then return end
-        local target = pickObject(input.Position)
-        if target then toggleSelection(target) elseif not overHub(input.Position) then exportMessage("No target found", "Choose a loaded model or part. Terrain is not supported.") end
+        local position = Input:GetMouseLocation()
+        local target = pickObject(position)
+        if pickerHighlight then pickerHighlight.Adornee = target end
+        if target then toggleSelection(target) elseif not overHub(position) then exportMessage("No target found", "Choose a loaded model or part. Terrain is not supported.") end
         return
     end
     if processed or Input:GetFocusedTextBox() then return end
+    if state.Picker and (input.KeyCode == Enum.KeyCode.Tab or input.KeyCode == Enum.KeyCode.R) then
+        state.PickLayer = input.KeyCode == Enum.KeyCode.R and 1 or (state.PickLayer % 6 + 1)
+        local target = pickObject(Input:GetMouseLocation())
+        if pickerHighlight then pickerHighlight.Adornee = target end
+        lastHoverTarget = nil
+        exportMessage("Hit layer " .. state.PickLayer, target and target:GetFullName() or "No object at this layer. Press R to return to the front.")
+        return
+    end
     if input.KeyCode == Config.FlyKey then
         setFly(not state.Fly)
         toggles.Fly:Set(state.Fly, false)
@@ -8565,9 +8645,9 @@ connect(RunService.RenderStepped, function(delta)
         pickerHighlight.Adornee = nil
     end
     local target = pickerHighlight.Adornee
-    if target ~= lastHoverTarget and pickerTarget then
-        lastHoverTarget = target
-        pickerTarget:SetDesc(target and (target:GetFullName() .. "\n" .. target.ClassName .. " · Click to select or unselect") or (state.Picker and "No selectable loaded object under the cursor." or "Enable Object picker to preview the exact target before clicking."))
+    if (target ~= lastHoverTarget or state.PickLayer ~= lastHoverLayer) and pickerTarget then
+        lastHoverTarget, lastHoverLayer = target, state.PickLayer
+        pickerTarget:SetDesc(target and (target:GetFullName() .. "\n" .. target.ClassName .. " · Layer " .. state.PickLayer .. " · Click to select or unselect") or (state.Picker and ("No object at hit layer " .. state.PickLayer .. ". Press R for the front layer.") or "Enable Object picker to preview the exact target before clicking."))
     end
 end)
 connect(Input.JumpRequest, function()
