@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.6.2",
+    Version = "1.7.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -14,6 +14,7 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local createExplorer
 local scriptLibrary
 local createObjectPicker
 local createHubExtras
@@ -461,6 +462,7 @@ refreshSelection = function()
         selectionSummary:SetTitle("Selected: " .. #selected)
         selectionSummary:SetDesc(#names > 0 and table.concat(names, "\n") or "Nothing selected. Click a target to add it; click it again to remove it.")
     end
+    if Session.Explorer then Session.Explorer:Refresh() end
 end
 
 clearSelection = function()
@@ -1028,6 +1030,18 @@ local function build()
 
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
+    local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
+    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Connect = connect,
+        Notify = notify, OwnUI = ownUI, GetSelection = function() return selected end,
+        ToggleSelection = toggleSelection, ClearSelection = clearSelection,
+        Export = function() exportSelection() end,
+        IsInternal = function(object)
+            if object == pickerHighlight or (Session.Sounds and Session.Sounds:IsOwned(object)) then return true end
+            for _, highlight in pairs(selectionHighlights) do if object == highlight then return true end end
+            local preview = vfxPreview and vfxPreview.Model
+            return preview and (object == preview or (object.IsDescendantOf and object:IsDescendantOf(preview))) or false
+        end })
+    table.insert(cleanups, function() Session.Explorer:Unload() end)
     local makerTab = Window:Tab({ Title = "Script Maker", Icon = "code" })
     local maker = createScriptMaker({ Tab = makerTab, Player = Player, Input = Input, Connect = connect, Notify = notify })
     table.insert(cleanups, function() maker:Unload() end)
@@ -1327,6 +1341,209 @@ local function build()
     end)
 end
 
+createExplorer = (function()
+return function(ctx)
+    local explorer = { Alive = true, Root = workspace, Focus = nil, Multiple = true, Search = "" }
+    local rowConnections, focusConnection = {}, nil
+    local expanded, rootConnections, rows = setmetatable({}, {__mode="k"}), {}, {}
+    local busy, queued, frame, treeScroll, propertyScroll, propertyText, treeTitle, exportButton, rootButton, rootMenu
+    local roots, rootLabels = {}, {}
+    local function name(object)
+        local ok, value = pcall(function() return object.Name end)
+        return ok and tostring(value) or "Unavailable"
+    end
+    local function path(object)
+        local ok, value = pcall(object.GetFullName, object)
+        return ok and value or name(object)
+    end
+    local function children(object)
+        local ok, values = pcall(object.GetChildren, object)
+        return ok and values or {}
+    end
+    local function class(object)
+        local ok, value = pcall(function() return object.ClassName end)
+        return ok and tostring(value) or "Service"
+    end
+    local function internal(object)
+        return ctx.OwnUI(object) or (frame and object.IsDescendantOf and object:IsDescendantOf(frame)) or ctx.IsInternal(object)
+    end
+    local fields = {"Name","ClassName","Parent","Archivable","Position","Size","CFrame","Orientation","Color","Material","Transparency","LocalTransparencyModifier","Anchored","CanCollide","CanTouch","CanQuery","Mass","CastShadow","MeshId","TextureID","TextureId","Value","Enabled","Visible","AbsolutePosition","AbsoluteSize","AnchorPoint","BackgroundColor3","BackgroundTransparency","Text","TextColor3","TextSize","Font","Image","ImageColor3","ImageTransparency","ZIndex","DisplayOrder","IgnoreGuiInset","ResetOnSpawn","CanvasSize","CanvasPosition","SoundId","Volume","PlaybackSpeed","TimePosition","TimeLength","Looped","IsPlaying","Texture","Rate","Lifetime","Speed","Brightness","LightEmission","Attachment0","Attachment1","WalkSpeed","JumpPower","JumpHeight","Health","MaxHealth","FieldOfView","CameraType","CameraSubject"}
+    function explorer:Properties(object)
+        if not object then return "Click an instance to inspect its readable properties.\nProperties are read-only. Script source is not read." end
+        local lines = {path(object), "Class: " .. class(object), ""}
+        for _, key in ipairs(fields) do
+            local ok, value = pcall(function() return object[key] end)
+            if ok and value ~= nil then
+                local text = typeof(value)=="Instance" and path(value) or tostring(value)
+                lines[#lines+1] = key .. " = " .. text:gsub("\n"," "):sub(1,240)
+            end
+        end
+        if object.GetAttributes then
+            local ok, attributes = pcall(object.GetAttributes,object)
+            if ok and next(attributes) then
+                lines[#lines+1]="";lines[#lines+1]="Attributes"
+                local keys={};for key in pairs(attributes) do keys[#keys+1]=key end;table.sort(keys)
+                for index,key in ipairs(keys) do if index>50 then break end;lines[#lines+1]=key.." = "..tostring(attributes[key]):sub(1,240) end
+            end
+        end
+        return table.concat(lines,"\n")
+    end
+    local function disconnectRoot()
+        for _, connection in ipairs(rootConnections) do connection:Disconnect() end
+        rootConnections={}
+    end
+    local function deferRefresh()
+        if queued or not explorer.Alive then return end
+        queued=true
+        task.defer(function() queued=false;if explorer.Alive then explorer:Refresh() end end)
+    end
+    function explorer:Inspect(object)
+        if focusConnection then focusConnection:Disconnect();focusConnection=nil end
+        self.Focus=object
+        if object and object.Changed then
+            focusConnection=object.Changed:Connect(function()
+                if explorer.Alive and explorer.Focus==object and propertyText then propertyText.Text=explorer:Properties(object) end
+            end)
+        end
+        if propertyText then propertyText.Text=self:Properties(object) end
+    end
+    function explorer:Choose(object)
+        if internal(object) then return end
+        self:Inspect(object)
+        local selected=ctx.GetSelection()
+        local wasSelected=false;for _,item in ipairs(selected) do if item==object then wasSelected=true end end
+        if not self.Multiple then ctx.ClearSelection() end
+        if self.Multiple or not wasSelected then ctx.ToggleSelection(object) end
+        self:Refresh()
+    end
+    function explorer:SetRoot(object)
+        disconnectRoot();self.Root=object;expanded[object]=true
+        if rootButton then rootButton.Text=(rootLabels[object] or name(object)) .. " ▾" end
+        local function changed(item) if not item or not internal(item) then deferRefresh() end end
+        for _,signalName in ipairs({"DescendantAdded","DescendantRemoving"}) do
+            local ok,signal=pcall(function() return object[signalName] end)
+            if ok and signal then rootConnections[#rootConnections+1]=signal:Connect(function(item) if explorer.Alive then changed(item) end end) end
+        end
+        self:Refresh()
+    end
+    function explorer:VisibleRows()
+        local result, scanned, truncated={},0,false
+        local query=self.Search:lower()
+        local stack={{Object=self.Root,Depth=0}}
+        while #stack>0 do
+            local entry=table.remove(stack);local object=entry.Object
+            if not internal(object) then
+                scanned=scanned+1
+                if scanned>2500 or #result>=400 then truncated=true;break end
+                local matches=query=="" or (name(object).." "..class(object)):lower():find(query,1,true)
+                if matches then result[#result+1]=entry end
+                if query~="" or expanded[object] then
+                    local list=children(object)
+                    table.sort(list,function(a,b) local an,bn=name(a),name(b);return an==bn and class(a)<class(b) or an<bn end)
+                    for index=#list,1,-1 do stack[#stack+1]={Object=list[index],Depth=entry.Depth+1} end
+                end
+            end
+        end
+        return result,truncated
+    end
+    local function ui(kind,values,parent)
+        local object=Instance.new(kind)
+        for key,value in pairs(values) do object[key]=value end
+        object.Parent=parent;return object
+    end
+    local function button(text,parent,position,size,callback,transient)
+        local object=ui("TextButton",{Text=text,Position=position,Size=size,BackgroundColor3=Color3.fromRGB(39,39,46),TextColor3=Color3.fromRGB(235,235,242),TextSize=12,Font=Enum.Font.GothamMedium,BorderSizePixel=0},parent)
+        ui("UICorner",{CornerRadius=UDim.new(0,6)},object)
+        if transient then
+            rowConnections[#rowConnections+1]=object.Activated:Connect(function() if explorer.Alive then callback() end end)
+        else ctx.Connect(object.Activated,callback) end
+        return object
+    end
+    local function addRoot(label,object)
+        if object and not rootLabels[object] then roots[#roots+1]=object;rootLabels[object]=label end
+    end
+    addRoot("Workspace",workspace)
+    addRoot("PlayerGui",ctx.Player:FindFirstChild("PlayerGui"))
+    for _,label in ipairs({"ReplicatedStorage","Players","Lighting","SoundService","StarterGui","StarterPlayer","CoreGui"}) do
+        local ok,object=pcall(game.GetService,game,label);if ok then addRoot(label,object) end
+    end
+    addRoot("Game",game)
+    local viewport=ctx.Tab.ContainerFrame
+    local original=ctx.Tab.UIElements and ctx.Tab.UIElements.ContainerFrame
+    if original then original.Visible=false end
+    frame=ui("Frame",{Name="ParawareExplorer",Size=UDim2.new(1,-12,1,-12),Position=UDim2.fromOffset(6,6),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0,ClipsDescendants=true},viewport)
+    ui("UICorner",{CornerRadius=UDim.new(0,10)},frame)
+    rootButton=button("Workspace ▾",frame,UDim2.fromOffset(8,8),UDim2.fromOffset(144,30),function() rootMenu.Visible=not rootMenu.Visible end)
+    local search=ui("TextBox",{Name="ExplorerSearch",Position=UDim2.fromOffset(160,8),Size=UDim2.new(1,-168,0,30),Text="",PlaceholderText="Search name or class in this root…",ClearTextOnFocus=false,TextColor3=Color3.fromRGB(240,240,245),PlaceholderColor3=Color3.fromRGB(150,150,160),BackgroundColor3=Color3.fromRGB(30,30,37),TextSize=12,Font=Enum.Font.Gotham,BorderSizePixel=0},frame)
+    ui("UICorner",{CornerRadius=UDim.new(0,6)},search)
+    ctx.Connect(search:GetPropertyChangedSignal("Text"),function() explorer.Search=search.Text:sub(1,80);deferRefresh() end)
+    local modes
+    button("Refresh",frame,UDim2.new(0,8,0,46),UDim2.new(0.25,-10,0,30),function() explorer:Refresh() end)
+    modes=button("Multi-select",frame,UDim2.new(0.25,3,0,46),UDim2.new(0.25,-10,0,30),function() explorer.Multiple=not explorer.Multiple;modes.Text=explorer.Multiple and "Multi-select" or "Single-select" end)
+    exportButton=button("Export (0)",frame,UDim2.new(0.5,0,0,46),UDim2.new(0.25,-10,0,30),function()
+        ctx.Export();ctx.Notify("Export status and saved paths are in Object export.")
+    end)
+    button("Clear all",frame,UDim2.new(0.75,-3,0,46),UDim2.new(0.25,-5,0,30),function() ctx.ClearSelection();explorer:Refresh() end)
+    local treePane=ui("Frame",{Name="ExplorerTreePane",Position=UDim2.fromOffset(8,84),Size=UDim2.new(0.48,-12,1,-92),BackgroundColor3=Color3.fromRGB(24,24,29),BorderSizePixel=0,ClipsDescendants=true},frame)
+    local propsPane=ui("Frame",{Name="ExplorerPropertiesPane",Position=UDim2.new(0.48,4,0,84),Size=UDim2.new(0.52,-12,1,-92),BackgroundColor3=Color3.fromRGB(24,24,29),BorderSizePixel=0,ClipsDescendants=true},frame)
+    treeTitle=ui("TextLabel",{Size=UDim2.new(1,-12,0,24),Position=UDim2.fromOffset(6,0),Text="Hierarchy",TextSize=12,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(215,215,225),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1},treePane)
+    button("Properties · copy",propsPane,UDim2.fromOffset(4,0),UDim2.new(1,-8,0,24),function()
+        if type(setclipboard)~="function" then ctx.Notify("Clipboard is unavailable.");return end
+        local ok=pcall(setclipboard,explorer:Properties(explorer.Focus));ctx.Notify(ok and "Properties copied." or "Could not copy properties.")
+    end)
+    treeScroll=ui("ScrollingFrame",{Name="ExplorerHierarchy",Position=UDim2.fromOffset(0,26),Size=UDim2.new(1,0,1,-26),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},treePane)
+    ui("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder},treeScroll)
+    propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,1,-34),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
+    propertyText=ui("TextLabel",{Name="ExplorerPropertyText",Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=explorer:Properties(nil),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(225,225,232),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1},propertyScroll)
+    rootMenu=ui("ScrollingFrame",{Name="ExplorerRootMenu",Visible=false,Position=UDim2.fromOffset(8,40),Size=UDim2.fromOffset(210,math.min(300,#roots*32)),BackgroundColor3=Color3.fromRGB(35,35,43),BorderSizePixel=0,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,ZIndex=20},frame)
+    ui("UIListLayout",{Padding=UDim.new(0,2)},rootMenu)
+    for _,object in ipairs(roots) do
+        local target=object
+        local row=button(rootLabels[target],rootMenu,UDim2.fromOffset(0,0),UDim2.new(1,-4,0,30),function() rootMenu.Visible=false;explorer:SetRoot(target) end);row.ZIndex=21
+    end
+    local function layout()
+        local narrow=frame.AbsoluteSize and frame.AbsoluteSize.X<580 or false
+        treePane.Position=UDim2.fromOffset(8,84)
+        treePane.Size=narrow and UDim2.new(1,-16,0.52,-48) or UDim2.new(0.48,-12,1,-92)
+        propsPane.Position=narrow and UDim2.new(0,8,0.52,44) or UDim2.new(0.48,4,0,84)
+        propsPane.Size=narrow and UDim2.new(1,-16,0.48,-52) or UDim2.new(0.52,-12,1,-92)
+    end
+    ctx.Connect(frame:GetPropertyChangedSignal("AbsoluteSize"),layout);layout()
+    function explorer:Refresh()
+        if not self.Alive or busy then return end
+        if not viewport.Visible then
+            exportButton.Text="Export ("..#ctx.GetSelection()..")"
+            return
+        end
+        busy=true
+        for _,connection in ipairs(rowConnections) do connection:Disconnect() end;rowConnections={}
+        for _,row in ipairs(rows) do row:Destroy() end;rows={}
+        local chosen={};local selection=ctx.GetSelection();for _,object in ipairs(selection) do chosen[object]=true end
+        exportButton.Text="Export ("..#selection..")"
+        local visible,truncated=self:VisibleRows()
+        treeTitle.Text="Hierarchy · "..#visible..(truncated and " (limited; narrow search)" or "")
+        for index,entry in ipairs(visible) do
+            local object,depth=entry.Object,math.min(entry.Depth,10)
+            local row=ui("Frame",{Size=UDim2.new(1,-6,0,28),BackgroundTransparency=1,LayoutOrder=index},treeScroll);rows[#rows+1]=row
+            local hasChildren=#children(object)>0
+            local arrow=button(hasChildren and (expanded[object] and "▾" or "▸") or "·",row,UDim2.fromOffset(depth*10,0),UDim2.fromOffset(22,28),function() expanded[object]=not expanded[object];explorer:Refresh() end,true)
+            arrow.BackgroundTransparency=1
+            local objectButton=button((chosen[object] and "✓ " or "")..name(object).."  ["..class(object).."]",row,UDim2.fromOffset(depth*10+24,0),UDim2.new(1,-depth*10-24,0,28),function() explorer:Choose(object) end,true)
+            objectButton.TextXAlignment=Enum.TextXAlignment.Left;objectButton.TextTruncate=Enum.TextTruncate.AtEnd
+            objectButton.BackgroundColor3=chosen[object] and Color3.fromRGB(74,44,46) or Color3.fromRGB(31,31,37)
+        end
+        if self.Focus then propertyText.Text=self:Properties(self.Focus) end
+        busy=false
+    end
+    function explorer:Unload()
+        self.Alive=false;disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
+    end
+    ctx.Connect(viewport:GetPropertyChangedSignal("Visible"),deferRefresh)
+    explorer:SetRoot(workspace)
+    return explorer
+end
+
+end)()
 scriptLibrary = (function()
 local Library = {}
 local path = "Paraware-library.json"
@@ -1620,6 +1837,8 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.7.0", Date = "2026-10-04", Title = "Built-in Explorer",
+      Changes = "Added hierarchy browsing, scoped search, read-only properties and attributes.\nAdded single/multiple selection and direct .rbxm export using the shared export selection.\nResponsive tree/property panels and bounded lazy browsing." },
     { Version = "1.6.2", Date = "2026-10-04", Title = "Registered game module",
       Changes = "Registered place 10765091041 with a dedicated Game tools tab and Game detected button." },
     { Version = "1.6.1", Date = "2026-10-04", Title = "Picker-only highlights",
