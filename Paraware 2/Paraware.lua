@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.0.0",
+    Version = "2.0.1",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -515,8 +515,14 @@ local preferences
 local aiChat
 aiChat = (function()
 local Chat={}
-local defaults={OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model='',Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
-local system='You are Paraware AI, a Roblox Luau assistant. Explain clearly. Use fenced lua or luau code blocks for scripts. You cannot execute scripts or inspect the game unless context is attached. Generated scripts are drafts.'
+local freeChatModel='qwen/qwen3.8-27b:free'
+local function classifierReport(value)
+    if type(value)~='string' or #value>500 then return false end
+    local report=value:lower():match('^%s*(.-)%s*$')
+    return report:match('^user safety:%s*[%w_%-]+%s+response safety:%s*[%w_%-]+%s*$')~=nil
+end
+local defaults={OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model=freeChatModel,Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
+local system='You are Paraware AI, a Roblox Luau assistant. Reply to the user in natural conversational text, including greetings and follow-up questions. Explain clearly. Use fenced lua or luau code blocks for scripts. You cannot execute scripts or inspect the game unless context is attached. Generated scripts are drafts.'
 function Chat.New(ctx)
     local self={Alive=true,Provider='OpenAI',Profiles={},Chats={},Current=1,Generation=0,Busy=false,Status='Choose a provider and enter its API key in Setup.',Context=''}
     local http=game:GetService('HttpService')
@@ -567,12 +573,16 @@ function Chat.New(ctx)
     end
     function self:BuildRequest(messages)
         local profile=self.Profiles[self.Provider]
+        if self.Provider=='OpenAI compatible' and profile.Endpoint=='https://openrouter.ai/api/v1/chat/completions' and profile.Model=='openrouter/free' then
+            profile.Model=freeChatModel
+        end
+        assert(not profile.Model:lower():match('guard') and not profile.Model:lower():match('moderation') and not profile.Model:lower():match('rerank'),'This model is a classifier. Choose a conversational chat model in Setup.')
         assert(#profile.Key>0,'Enter an API key in Setup first.')
         assert(profile.Model:match('^[%w%._:/%-]+$') and #profile.Model<=160,'Enter a valid model ID in Setup.')
         local history={};local size=0
         for i=#messages,1,-1 do
             local m=messages[i]
-            if not m.Failed then
+            if not m.Failed and not (m.Role=='assistant' and classifierReport(m.Text)) then
                 if size+#m.Text>60000 or #history>=24 then break end
                 table.insert(history,1,{role=m.Role,content=m.Text});size=size+#m.Text
             end
@@ -610,7 +620,7 @@ function Chat.New(ctx)
             local content=data.choices and data.choices[1] and data.choices[1].message and data.choices[1].message.content
             if type(content)=='string' then out[1]=content end
         end
-        local value=table.concat(out,'\n');assert(#value>0,'Provider returned no text. Check the model, output budget, or safety response.');assert(#value<=32768,'Response exceeds the 32 KB chat limit. Ask for a shorter reply.');return value
+        local value=table.concat(out,'\n');assert(#value>0,'Provider returned no text. Check the model, output budget, or safety response.');assert(not classifierReport(value),'The model returned a safety classification instead of a chat reply. Choose a conversational model in Setup, then Retry.');assert(#value<=32768,'Response exceeds the 32 KB chat limit. Ask for a shorter reply.');return value
     end
     function self:Send(value,retry)
         if self.Busy then self.Status='A reply is already pending.';self:Changed();return false end
@@ -2672,6 +2682,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "2.0.1", Date = "2026-10-04", Title = "Conversational AI replies", Changes = "Pinned a free chat model instead of random routing, excluded classifier reports from follow-up history, and added clear wrong-model errors." },
     { Version = "2.0.0", Date = "2026-10-04", Title = "API AI Chat", Changes = "Restored AI Chat with OpenAI, Gemini, Claude and compatible endpoints. Replies, saved local chats, code copy and stopped Script Maker drafts are built in." },
     { Version = "1.9.1", Date = "2026-10-04", Title = "Explorer world picking", Changes = "Added Pick in game on/off. World clicks select, highlight, inspect and reveal targets in Explorer, with shared picker controls." },
     { Version = "1.9.0", Date = "2026-10-04", Title = "Editable properties", Changes = "Added typed property and existing-attribute editing, boolean checkboxes, grouped rows and undo. Roblox read-only properties remain locked." },
