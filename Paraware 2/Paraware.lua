@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.8.0",
+    Version = "1.8.1",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -14,6 +14,14 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local explorerArrows
+explorerArrows = (function()
+return {
+    Right = { File = "Paraware-explorer-right.png", Data = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAwElEQVR4nO3UQQ6DIBCFYTB6L4lhryeonqyeA1jYG9ib4Anom6bdd4CEpJk/IeJqvhhBq8YJQAACEAAbEEK4p5RWpdTR9/1ijInYZ8cGeO8THt9OIGDIR5QCKEJsxpgTe3Y1AFQEAgY+ohaAiliLtfZQjGoC3nVdt03TtKsfqw6gOIj/A3CGUzUBF9bc6ie8cAzHJscQ1/JzGIY1ZzhVBPgMHzE84jUrNsA5t2utb9g+8NnnkuEUG1A7AQhAAAJ4AYaeWSEswVjXAAAAAElFTkSuQmCC", Runs = {{12,9,1,188,188,188,159},{13,9,1,187,187,187,255},{14,9,1,187,187,187,191},{15,9,1,191,191,191,16},{12,10,3,187,187,187,255},{15,10,1,187,187,187,207},{16,10,1,191,191,191,16},{12,11,4,187,187,187,255},{16,11,1,187,187,187,207},{17,11,1,191,191,191,48},{12,12,5,187,187,187,255},{17,12,1,187,187,187,239},{18,12,1,191,191,191,48},{12,13,6,187,187,187,255},{18,13,1,187,187,187,239},{19,13,1,187,187,187,64},{12,14,8,187,187,187,255},{20,14,1,189,189,189,96},{12,15,9,187,187,187,255},{21,15,1,189,189,189,96},{12,16,9,187,187,187,255},{21,16,1,189,189,189,96},{12,17,8,187,187,187,255},{20,17,1,189,189,189,96},{12,18,6,187,187,187,255},{18,18,1,187,187,187,240},{19,18,1,187,187,187,64},{12,19,5,187,187,187,255},{17,19,1,187,187,187,240},{18,19,1,191,191,191,48},{12,20,4,187,187,187,255},{16,20,1,186,186,186,208},{17,20,1,191,191,191,48},{12,21,3,187,187,187,255},{15,21,1,186,186,186,208},{16,21,1,191,191,191,16},{12,22,1,186,186,186,160},{13,22,1,187,187,187,255},{14,22,1,187,187,187,192},{15,22,1,191,191,191,16}} },
+    Down = { File = "Paraware-explorer-down.png", Data = "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAA2UlEQVR4nO3SwQnCMBTG8ZfSnnUT3cCG0j10A51EN9A9SmncQDfRc0vj924epMmLQhHeH0ISKH2/QwzNnAIUoAAFKOA/AE3THLHtsSSd6ro+YJ8sFuCxiQMg+P/gBxwAjog2WJKuAJQUKArQdd2y73tnjFnhGsx7fy+KorTWPnCdLArAxSIkw7loAAfEehgGR0QLrE898zzn4TecoxIBuAmEeDgnBnB4lCXBgvWexaNzJCwJwLVtux3H8YwjZVm2q6rqQgklAzhGEEodzn0F+EUKUIACFDA74AX+iUkh8FVHRwAAAABJRU5ErkJggg==", Runs = {{9,12,1,187,187,187,143},{10,12,12,187,187,187,255},{22,12,1,187,187,187,143},{9,13,14,187,187,187,255},{9,14,1,187,187,187,192},{10,14,12,187,187,187,255},{22,14,1,187,187,187,192},{9,15,1,191,191,191,16},{10,15,1,186,186,186,208},{11,15,10,187,187,187,255},{21,15,1,186,186,186,208},{22,15,1,191,191,191,16},{10,16,1,191,191,191,16},{11,16,1,186,186,186,208},{12,16,8,187,187,187,255},{20,16,1,186,186,186,208},{21,16,1,191,191,191,16},{11,17,1,191,191,191,48},{12,17,1,187,187,187,240},{13,17,6,187,187,187,255},{19,17,1,187,187,187,240},{20,17,1,191,191,191,48},{12,18,1,191,191,191,48},{13,18,1,187,187,187,240},{14,18,4,187,187,187,255},{18,18,1,187,187,187,240},{19,18,1,191,191,191,48},{13,19,1,187,187,187,64},{14,19,4,187,187,187,255},{18,19,1,187,187,187,64},{14,20,1,189,189,189,96},{15,20,2,187,187,187,255},{17,20,1,189,189,189,96},{15,21,2,189,189,189,96}} },
+}
+
+end)()
 local explorerIcons
 explorerIcons = (function()
 --[[
@@ -1375,7 +1383,7 @@ local function build()
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
     Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Connect = connect,
-        Notify = notify, OwnUI = ownUI, GetSelection = function() return selected end,
+        Notify = notify, OwnUI = ownUI, DecodeImage = decodeBase64, GetSelection = function() return selected end,
         ToggleSelection = toggleSelection, ClearSelection = clearSelection,
         Export = function() exportSelection() end,
         IsInternal = function(object)
@@ -1809,6 +1817,24 @@ return function(ctx)
         else ctx.Connect(object.Activated,callback) end
         return object
     end
+    local arrowAssets = {}
+    for direction,data in pairs(explorerArrows) do
+        local customAsset=getcustomasset or getsynasset
+        if type(writefile)=="function" and type(customAsset)=="function" then
+            local ok,asset=pcall(function() writefile(data.File,ctx.DecodeImage(data.Data));return customAsset(data.File) end)
+            if ok and type(asset)=="string" and asset~="" then arrowAssets[direction]=asset end
+        end
+    end
+    local function drawArrow(parent,direction)
+        if arrowAssets[direction] then
+            ui("ImageLabel",{Name="ExplorerArrowImage",Image=arrowAssets[direction],Position=UDim2.fromOffset(2,4),Size=UDim2.fromOffset(16,16),BackgroundTransparency=1},parent)
+        else
+            local glyph=ui("Frame",{Name="ExplorerArrowFallback",Position=UDim2.fromOffset(2,4),Size=UDim2.fromOffset(16,16),BackgroundTransparency=1},parent)
+            for _,run in ipairs(explorerArrows[direction].Runs) do
+                ui("Frame",{Position=UDim2.new(run[1]/32,0,run[2]/32,0),Size=UDim2.new(run[3]/32,0,1/32,0),BackgroundColor3=Color3.fromRGB(run[4],run[5],run[6]),BackgroundTransparency=1-run[7]/255,BorderSizePixel=0},glyph)
+            end
+        end
+    end
     local function addRoot(label,object)
         if object and not rootLabels[object] then roots[#roots+1]=object;rootLabels[object]=label end
     end
@@ -1883,8 +1909,10 @@ return function(ctx)
             local object,depth=entry.Object,math.min(entry.Depth,10)
             local row=ui("Frame",{Size=UDim2.new(1,-6,0,24),BackgroundTransparency=1,LayoutOrder=index},treeScroll);rows[#rows+1]=row
             local hasChildren=#children(object)>0
-            local arrow=button(hasChildren and (expanded[object] and "▾" or "▸") or "",row,UDim2.fromOffset(depth*10,0),UDim2.fromOffset(20,24),function() expanded[object]=not expanded[object];explorer:Refresh() end,true)
+            local arrow=button("",row,UDim2.fromOffset(depth*10,0),UDim2.fromOffset(20,24),function() expanded[object]=not expanded[object];explorer:Refresh() end,true)
+            arrow.Name=expanded[object] and "ExplorerCollapse" or "ExplorerExpand"
             arrow.BackgroundTransparency=1
+            if hasChildren then drawArrow(arrow,expanded[object] and "Down" or "Right") else arrow.Active=false;arrow.AutoButtonColor=false end
             local objectButton=button((chosen[object] and "✓ " or "")..name(object),row,UDim2.fromOffset(depth*10+22,0),UDim2.new(1,-depth*10-22,0,24),function() explorer:Choose(object) end,true)
             local iconIndex=(explorerIcons.Classes[class(object)] or explorerIcons.Classes.Service or 1)-1
             ui("ImageLabel",{Name="ExplorerClassIcon",Image=explorerIcons.Image,ImageRectSize=Vector2.new(explorerIcons.Size,explorerIcons.Size),ImageRectOffset=Vector2.new(iconIndex%explorerIcons.Columns*explorerIcons.Size,math.floor(iconIndex/explorerIcons.Columns)*explorerIcons.Size),Position=UDim2.fromOffset(depth*10+25,4),Size=UDim2.fromOffset(16,16),BackgroundTransparency=1},row)
@@ -2197,6 +2225,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.8.1", Date = "2026-10-04", Title = "Explorer arrows", Changes = "Added supplied right/down PNG arrows with an embedded fallback and a separate expansion click area." },
     { Version = "1.8.0", Date = "2026-10-04", Title = "Service Explorer", Changes = "Removed model preview. Added Dex++ class icons, a game service tree, property filtering and instance path copy." },
     { Version = "1.7.1", Date = "2026-10-04", Title = "Explorer model preview", Changes = "Click models or parts to preview isolated geometry with a slow spin and pause control." },
     { Version = "1.7.0", Date = "2026-10-04", Title = "Built-in Explorer",
