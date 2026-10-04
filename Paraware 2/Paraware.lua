@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.5.0",
+    Version = "1.6.2",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -14,6 +14,7 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
@@ -87,6 +88,14 @@ local vfxPlaying, vfxLoop, vfxScanBusy = false, false, false
 local vfxElapsed, vfxBurstClock = 0, 0
 local vfxBurst, vfxInterval, vfxDuration, vfxDistance = 30, 1, 3, 12
 local destroyVfxPreview, buildVfxRig
+
+local function syncPickerHighlights()
+    for _, highlight in pairs(selectionHighlights) do highlight.Enabled = state.Picker end
+    if pickerHighlight then
+        pickerHighlight.Enabled = state.Picker
+        if not state.Picker then pickerHighlight.Adornee = nil end
+    end
+end
 
 local function decodeBase64(data)
     local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
@@ -348,6 +357,7 @@ local function reset()
     state.Fly, state.InfiniteJump, state.Noclip = false, false, false
     state.Altitude = "Level"
     state.Picker = false
+    syncPickerHighlights()
     if clearSelection then clearSelection() end
     if pickerHighlight then pickerHighlight.Adornee = nil end
     restoreCharacter()
@@ -485,6 +495,7 @@ local function toggleSelection(target)
     if target:IsA("Model") or target:IsA("BasePart") then
         local highlight = Instance.new("Highlight")
         highlight.Name, highlight.Adornee = "ParawareSelected", target
+        highlight.Enabled = state.Picker
         highlight.FillColor, highlight.OutlineColor = selectionStyle.Fill, selectionStyle.Outline
         highlight.FillTransparency, highlight.OutlineTransparency = 1 - selectionStyle.Opacity, 0.05
         highlight.DepthMode, highlight.Parent = Enum.HighlightDepthMode.Occluded, workspace
@@ -1021,6 +1032,18 @@ local function build()
     local maker = createScriptMaker({ Tab = makerTab, Player = Player, Input = Input, Connect = connect, Notify = notify })
     table.insert(cleanups, function() maker:Unload() end)
     Session.ScriptMaker = maker
+    Session.Library = scriptLibrary.Build({ Manager = maker, Tab = makerTab, Notify = notify })
+    Session.Recover = function()
+        cancelExport = exportBusy and true or false
+        maker:StopAll()
+        reset(); clearSelection()
+        if destroySoundPreview then destroySoundPreview() end
+        if destroyVfxPreview then destroyVfxPreview() end
+        updateSoundTimeline()
+        soundMessage("Preview cleared", "Select a sound and press Play to preview again.")
+        vfxMessage("Preview cleared", "Select an effect and press Play preview to create a new rig.")
+        notify("Managed scripts stopped, controls restored, selection and previews cleared. External scripts require their own unload.")
+    end
     local settings = Window:Tab({ Title = "Session", Icon = "settings" })
     if Window.UIElements then
         Window.UIElements.SideBarContainer.Visible = true
@@ -1121,9 +1144,10 @@ local function build()
         log("Fullbright " .. tostring(value))
     end)
 
-    assets:Paragraph({ Title = "Build your export selection", Desc = "Select multiple models or parts. Click the same target again to unselect it. Export selected saves them together in one .rbxm; descendants are included and overlapping selections are saved once." })
+    assets:Paragraph({ Title = "Build your export selection", Desc = "Pick objects, review the selected targets, then export. Click a selected object again to remove it." })
     toggle(assets, "Picker", "Object picker", "Click to add or remove a target. Selecting does not save a file.", function(value)
         state.Picker = value
+        syncPickerHighlights()
         state.PickLayer = 1
         lastHoverTarget, lastHoverLayer = nil, nil
         if pickerTarget then pickerTarget:SetDesc(value and "Move the cursor over a loaded object to preview its target." or "Enable Object picker to preview the exact target before clicking.") end
@@ -1153,7 +1177,8 @@ local function build()
         end
     end })
     selectedDetails = assets:Paragraph({ Title = "Target details", Desc = "Choose a selected target to inspect or remove it." })
-    assets:Button({ Title = "Remove selected target", Callback = function()
+    local actions = assets:Section({ Title = "Selection actions", Icon = "mouse-pointer-2", Opened = true, Box = true })
+    actions:Button({ Title = "Remove selected target", Callback = function()
         if not selectionChoice then notify("Choose a target in Selected targets first."); return end
         toggleSelection(selectionChoice)
     end })
@@ -1161,14 +1186,14 @@ local function build()
     files:Dropdown({ Title = "File layout", Values = { "Together", "Separate files" }, Value = exportLayout, Callback = function(value) exportLayout = value end })
     files:Input({ Title = "Filename", Placeholder = "Automatic", Value = "", Callback = function(value) customFilename = tostring(value):sub(1, 64) end })
     files:Paragraph({ Title = "File destination", Desc = "Paraware-Exports/Models, UI, or Mixed inside your executor workspace. If folders are unavailable, filenames carry the category. Timestamps prevent overwrites." })
-    assets:Button({ Title = "Export selected", Icon = "download", Callback = function() exportSelection() end })
-    assets:Button({ Title = "Cancel export", Callback = function()
+    actions:Button({ Title = "Export selected", Icon = "download", Callback = function() exportSelection() end })
+    actions:Button({ Title = "Cancel export", Callback = function()
         if not exportBusy then notify("No export is running."); return end
         cancelExport = true
         exportMessage("Cancellation requested", "Waiting for the active serialization to return. Its pending write and remaining files will be skipped; already saved files are kept.")
     end })
-    assets:Button({ Title = "Clear all", Desc = "Unselect every export target and remove its highlight. Saved files are kept.", Icon = "x", Callback = function() clearSelection(); if pickerHighlight then pickerHighlight.Adornee = nil end; exportMessage("Selection cleared", "Select targets to start a new export.") end })
-    assets:Button({ Title = "Copy last export path", Icon = "copy", Callback = function()
+    actions:Button({ Title = "Clear all", Desc = "Unselect every export target and remove its highlight. Saved files are kept.", Icon = "x", Callback = function() clearSelection(); if pickerHighlight then pickerHighlight.Adornee = nil end; exportMessage("Selection cleared", "Select targets to start a new export.") end })
+    actions:Button({ Title = "Copy last export path", Icon = "copy", Callback = function()
         if not lastExportPath then notify("Export a selection first."); return end
         if not setclipboard then notify("Clipboard isn't supported by this runtime."); return end
         local copied = pcall(setclipboard, lastExportPath)
@@ -1177,12 +1202,13 @@ local function build()
     local models = assets:Section({ Title = "Model export", Icon = "box", Opened = false, Box = true })
     models:Button({ Title = "Pick models", Callback = function()
         state.Picker, state.PickMode = true, "Smart model"
+        syncPickerHighlights()
         selectionMode:Select("Smart model")
         toggles.Picker:Set(true, false)
         exportMessage("Model picker ready", "Click models to add/remove them. Export models only saves the model/part targets in your selection.")
     end })
     models:Button({ Title = "Export models only", Callback = function() exportSelection("Models") end })
-    local gameUI = assets:Section({ Title = "Whole game UI", Icon = "panels-top-left", Opened = true, Box = true })
+    local gameUI = assets:Section({ Title = "Whole game UI", Icon = "panels-top-left", Opened = false, Box = true })
     gameUI:Paragraph({ Title = "One UI file", Desc = "Export every loaded game ScreenGui in PlayerGui, including hidden interfaces and their descendants, into one .rbxm. Excludes Paraware and known Cobalt/Dex++ screens. Scripts are excluded; unopened interfaces that have not been created yet cannot be saved." })
     gameUI:Button({ Title = "Export whole game UI", Icon = "download", Callback = function() exportSelection("Game UI") end })
     local audio = assets:Section({ Title = "Sound export", Icon = "volume-2", Opened = false, Box = true })
@@ -1281,6 +1307,7 @@ local function build()
         local ok = pcall(setclipboard, "PlaceId = " .. game.PlaceId .. "\nGameId = " .. game.GameId)
         notify(ok and "Game IDs copied." or "Could not copy game IDs.")
     end })
+    settings:Button({ Title = "Recover workspace", Desc = "Stop managed scripts, restore controls, and clear selection/previews. External hooks and UI require their own unload.", Callback = Session.Recover })
     settings:Button({ Title = "Restore all controls", Callback = function() reset(); notify("All controls restored.") end })
     settings:Button({ Title = "Unload Paraware", Desc = "Restore values, stop flight, and disconnect the hub.", Callback = Session.Unload })
     createHubExtras.Build({ Window = Window, WindUI = WindUI, Config = Config,
@@ -1300,6 +1327,199 @@ local function build()
     end)
 end
 
+scriptLibrary = (function()
+local Library = {}
+local path = "Paraware-library.json"
+local limit = 8 * 1024 * 1024
+local function validate(data)
+    assert(type(data) == "table" and data.Schema == 1 and type(data.Entries) == "table", "Invalid library format")
+    assert(type(data.NextId) == "number" and data.NextId >= 0 and data.NextId % 1 == 0, "Invalid library counter")
+    assert(#data.Entries <= 32, "Library exceeds 32 scripts")
+    local seen = {}
+    for _, entry in ipairs(data.Entries) do
+        assert(type(entry.Id) == "number" and entry.Id >= 1 and entry.Id <= data.NextId and not seen[entry.Id], "Invalid library ID")
+        seen[entry.Id] = true
+        assert(type(entry.Name) == "string" and #entry.Name <= 80 and type(entry.Revisions) == "table" and #entry.Revisions >= 1 and #entry.Revisions <= 5, "Invalid library entry")
+        assert(type(entry.PlaceId) == "number" and type(entry.UniverseId) == "number" and type(entry.Favorite) == "boolean", "Invalid library metadata")
+        for _, revision in ipairs(entry.Revisions) do
+            assert(type(revision.Code) == "string" and #revision.Code <= 131072 and type(revision.Time) == "string", "Invalid revision")
+            assert(revision.Role == "Local" or revision.Role == "Controller", "Invalid script role")
+            assert(revision.Mode == "Managed" or (revision.Mode == "Executor compatibility" and revision.Role == "Local"), "Invalid execution mode")
+        end
+    end
+    return data
+end
+function Library.New()
+    local self = { Data = { Schema = 1, NextId = 0, Entries = {} }, Storage = "Session only", DiskBlocked = false }
+    local http = game:GetService("HttpService")
+    local function read(file)
+        local raw = readfile(file)
+        assert(#raw <= limit, "Library exceeds 8 MB")
+        return validate(http:JSONDecode(raw)), raw
+    end
+    if type(readfile) == "function" then
+        local ok, data, raw = pcall(read, path)
+        if ok then self.Data, self.LastRaw, self.Storage = data, raw, "Saved in executor workspace"
+        else
+            local restored, backup, backupRaw = pcall(read, path .. ".bak")
+            if restored then self.Data, self.LastRaw, self.Storage = backup, backupRaw, "Recovered from last disk backup"
+            elseif type(isfile) ~= "function" or isfile(path) then
+                self.DiskBlocked, self.Storage = true, "Unreadable library preserved; session-only saving"
+            end
+        end
+    else
+        self.DiskBlocked, self.Storage = true, "Session only; file reading is unavailable"
+    end
+    local function clone(data)
+        local copy = { Schema = 1, NextId = data.NextId, Entries = {} }
+        for _, entry in ipairs(data.Entries) do
+            local item = { Id = entry.Id, Name = entry.Name, PlaceId = entry.PlaceId, UniverseId = entry.UniverseId, Favorite = entry.Favorite, Revisions = {} }
+            for _, revision in ipairs(entry.Revisions) do
+                item.Revisions[#item.Revisions + 1] = { Code = revision.Code, Time = revision.Time, Role = revision.Role, Mode = revision.Mode }
+            end
+            copy.Entries[#copy.Entries + 1] = item
+        end
+        return copy
+    end
+    local function commit(data)
+        validate(data)
+        local raw = http:JSONEncode(data)
+        assert(#raw <= limit, "Library exceeds 8 MB; save fewer scripts or smaller sources")
+        if type(writefile) == "function" and not self.DiskBlocked then
+            if self.LastRaw then writefile(path .. ".bak", self.LastRaw) end
+            writefile(path, raw)
+            if type(readfile) == "function" then assert(readfile(path) == raw, "Library write verification failed; retry saving") end
+            self.LastRaw, self.Storage = raw, "Saved in executor workspace"
+        elseif not self.DiskBlocked then self.Storage = "Session only; file writing is unavailable" end
+        self.Data = data
+    end
+    function self:Get(id)
+        for _, entry in ipairs(self.Data.Entries) do if entry.Id == id then return entry end end
+    end
+    function self:Save(record, thisGame)
+        assert(type(record.Code) == "string" and #record.Code <= 131072, "Source exceeds 128 KB")
+        local data = clone(self.Data)
+        local entry
+        for _, item in ipairs(data.Entries) do if item.Id == record.LibraryId then entry = item end end
+        if not entry then
+            assert(#data.Entries < 32, "Library is full (32 scripts)")
+            data.NextId = data.NextId + 1
+            entry = { Id = data.NextId, Name = record.Name, PlaceId = 0, UniverseId = 0, Favorite = false, Revisions = {} }
+            data.Entries[#data.Entries + 1] = entry
+        end
+        entry.Name = record.Name:sub(1,80)
+        entry.PlaceId, entry.UniverseId = thisGame and game.PlaceId or 0, thisGame and game.GameId or 0
+        local latest = entry.Revisions[#entry.Revisions]
+        if not latest or latest.Code ~= record.Code or latest.Role ~= record.Role or latest.Mode ~= record.Mode then
+            entry.Revisions[#entry.Revisions + 1] = { Code = record.Code, Role = record.Role, Mode = record.Mode, Time = os.date("%Y-%m-%d %H:%M:%S") }
+            if #entry.Revisions > 5 then table.remove(entry.Revisions,1) end
+        end
+        commit(data)
+        record.LibraryId, record.SavedCode = entry.Id, record.Code
+        return entry.Id
+    end
+    function self:Favorite(id, value)
+        local data = clone(self.Data)
+        local found = false
+        for _, entry in ipairs(data.Entries) do if entry.Id == id then entry.Favorite = value; found = true end end
+        assert(found, "Choose a saved script"); commit(data)
+    end
+    function self:Delete(id)
+        local data = clone(self.Data)
+        local deleted
+        for index, entry in ipairs(data.Entries) do
+            if entry.Id == id then deleted = entry; table.remove(data.Entries,index); break end
+        end
+        assert(deleted,"Choose a saved script")
+        commit(data); self.Deleted = deleted
+    end
+    function self:UndoDelete()
+        assert(self.Deleted,"No deletion to undo this session")
+        assert(#self.Data.Entries < 32,"Library is full")
+        local data = clone(self.Data)
+        data.Entries[#data.Entries + 1] = self.Deleted
+        commit(data); self.Deleted = nil
+    end
+    return self
+end
+function Library.Build(ctx)
+    local library, manager = Library.New(), ctx.Manager
+    local section = ctx.Tab:Section({ Title = "Script library", Icon = "library", Opened = true, Box = true })
+    local query, filter, thisGame, chosen, revisionIndex = "", "All scripts", true, nil, nil
+    local entries, versionMap, dropdown, revisions
+    local status = section:Paragraph({ Title = "Saved scripts", Desc = "Loading local library…" })
+    local function selectedEntry() return chosen and library:Get(chosen) end
+    local function refresh()
+        local values = {}; entries = {}
+        for _, entry in ipairs(library.Data.Entries) do
+            local matches = entry.Name:lower():find(query:lower(),1,true)
+            local scope = filter == "All scripts" or (filter == "Favorites" and entry.Favorite) or (filter == "This game" and (entry.PlaceId == game.PlaceId or (entry.UniverseId ~= 0 and entry.UniverseId == game.GameId)))
+            if matches and scope then
+                local label = entry.Id .. " | " .. entry.Name .. (entry.Favorite and " ★" or "")
+                values[#values + 1], entries[label] = label, entry.Id
+            end
+        end
+        if dropdown then dropdown:Refresh(#values > 0 and values or { "No matching saved scripts" }) end
+        if chosen and not library:Get(chosen) then chosen = nil end
+        versionMap = {}; local versions = {}
+        local entry = selectedEntry()
+        if entry then
+            for index = #entry.Revisions, 1, -1 do
+                local label = index .. " | " .. entry.Revisions[index].Time .. (index == #entry.Revisions and " (latest)" or "")
+                versions[#versions + 1], versionMap[label] = label, index
+            end
+        end
+        if revisions then revisions:Refresh(#versions > 0 and versions or { "Choose a saved script" }) end
+        status:SetDesc(#library.Data.Entries .. "/32 scripts · " .. library.Storage .. "\n" .. (entry and (entry.Name .. " · " .. #entry.Revisions .. "/5 revisions") or "Save a script, then select it to open or restore a revision.") .. "\nOpen never runs a script. Controller-child ownership is not restored.")
+    end
+    local function act(fn)
+        local ok, err = pcall(fn)
+        if not ok then ctx.Notify(tostring(err)) end
+        refresh()
+    end
+    section:Input({ Title = "Search library", Placeholder = "Script name", Callback = function(value) query = tostring(value):sub(1,80); refresh() end })
+    section:Dropdown({ Title = "Library filter", Values = { "All scripts", "This game", "Favorites" }, Value = filter, Callback = function(value) filter = value; refresh() end })
+    dropdown = section:Dropdown({ Title = "Saved script", Values = {}, SearchBarEnabled = true, Callback = function(value) chosen = entries[value]; revisionIndex = nil; refresh() end })
+    revisions = section:Dropdown({ Title = "Revision", Values = {}, Callback = function(value) revisionIndex = versionMap[value] end })
+    section:Toggle({ Title = "Link saves to this game", Value = true, Callback = function(value) thisGame = value end })
+    function manager:SaveLibrarySelected()
+        local record = assert(self.Records[self.Selected], "Create or select a script first")
+        chosen = library:Save(record, thisGame); revisionIndex = nil
+        self:SetSource(record.Id,record.Code)
+        refresh(); ctx.Notify("Library saved · " .. library.Storage)
+    end
+    section:Button({ Title = "Save selected to library", Callback = function() act(function() manager:SaveLibrarySelected() end) end })
+    section:Button({ Title = "Open saved script", Desc = "Creates a new stopped script in Script Maker.", Callback = function() act(function()
+        local entry = assert(selectedEntry(), "Choose a saved script")
+        local revision = entry.Revisions[revisionIndex or #entry.Revisions]
+        local id = manager:Create(entry.Name,revision.Role,nil,nil,revision.Code)
+        manager:SetMode(id,revision.Mode)
+        local record = manager.Records[id]; record.LibraryId,record.SavedCode = entry.Id, revision.Code
+        manager:SetSource(id,record.Code)
+        ctx.Notify("Opened in Script Maker. Switch to Editor to review and run.")
+    end) end })
+    section:Button({ Title = "Restore revision to selected script", Desc = "Saves a backup of the selected source first, then replaces its code and stops it.", Callback = function() act(function()
+        local entry = assert(selectedEntry(), "Choose a saved script")
+        local revision = entry.Revisions[assert(revisionIndex,"Choose a revision")]
+        local record = assert(manager.Records[manager.Selected],"Select a script to restore into")
+        library:Save(record,thisGame)
+        manager:Stop(record.Id,"Restored")
+        manager:SetSource(record.Id,revision.Code)
+        ctx.Notify("Source restored; previous source backed up. Execution mode is unchanged.")
+    end) end })
+    section:Button({ Title = "Toggle favorite", Callback = function() act(function()
+        local entry = assert(selectedEntry(),"Choose a saved script"); library:Favorite(entry.Id,not entry.Favorite)
+    end) end })
+    section:Button({ Title = "Delete saved entry", Desc = "Keeps open scripts. Undo restores the last deleted entry this session.", Callback = function() act(function()
+        library:Delete(assert(chosen,"Choose a saved script")); chosen,revisionIndex = nil,nil
+    end) end })
+    section:Button({ Title = "Undo last library deletion", Callback = function() act(function() library:UndoDelete() end) end })
+    refresh()
+    return library
+end
+return Library
+
+end)()
 createObjectPicker = (function()
 return function(ctx)
     local state = ctx.State
@@ -1400,6 +1620,12 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.6.2", Date = "2026-10-04", Title = "Registered game module",
+      Changes = "Registered place 10765091041 with a dedicated Game tools tab and Game detected button." },
+    { Version = "1.6.1", Date = "2026-10-04", Title = "Picker-only highlights",
+      Changes = "Selection fill and outlines hide when picker mode is off.\nSelections remain ready for export and highlights return when picking resumes." },
+    { Version = "1.6.0", Date = "2026-10-04", Title = "Library, backups, and recovery",
+      Changes = "Added searchable saved-script library, favorites, game linking, and five revisions per script.\nAdded editor Save button and unsaved-code marker.\nAdded compatibility report and workspace recovery." },
     { Version = "1.5.0", Date = "2026-10-04", Title = "Picker accuracy fixes",
       Changes = "Fixed cursor/top-bar coordinate mismatch and unified hover/click positions.\nSmart model avoids large map containers.\nAdded small-target assist on center misses and keyboard hit-layer cycling." },
     { Version = "1.4.0", Date = "2026-10-04", Title = "Export selection improvements",
@@ -1635,6 +1861,14 @@ function Extras.Build(ctx)
         end)
         persistence:SetDesc(ok and ("Saved to " .. settingsFile .. " in the executor workspace.") or tostring(err))
     end
+    local compatibility = settings:Section({ Title = "Runtime compatibility", Icon = "shield-check", Opened = false, Box = true })
+    local report = compatibility:Paragraph({ Title = "Available features", Desc = ctx.Session.ScriptMaker:Capabilities() })
+    compatibility:Button({ Title = "Refresh compatibility report", Callback = function() report:SetDesc(ctx.Session.ScriptMaker:Capabilities()) end })
+    compatibility:Button({ Title = "Copy troubleshooting report", Callback = function()
+        if type(setclipboard) ~= "function" then ctx.Notify("Clipboard is unavailable."); return end
+        local ok = pcall(setclipboard, "Paraware " .. ctx.Config.Version .. "\nPlace: " .. game.PlaceId .. "\nUniverse: " .. game.GameId .. "\n" .. ctx.Session.ScriptMaker:Capabilities())
+        ctx.Notify(ok and "Troubleshooting report copied." or "Could not copy the report.")
+    end })
     local appearance = settings:Section({ Title = "Appearance", Opened = true, Box = true })
     appearance:Toggle({ Title = "Glass background", Value = prefs.Glass, Callback = function(value)
         prefs.Glass = value; window:ToggleTransparency(value); save()
@@ -1791,6 +2025,11 @@ return function(context)
         end
         changed()
     end
+    function manager:StopAll()
+        local roots = {}
+        for id, record in pairs(self.Records) do if not record.Owner or not self.Records[record.Owner] then roots[#roots + 1] = id end end
+        for _, id in ipairs(roots) do self:Stop(id, "Stopped") end
+    end
     function manager:Create(name, role, owner, parent, source)
         local count = 0; for _ in pairs(self.Records) do count = count + 1 end
         assert(count < 64, 'Maximum 64 managed scripts')
@@ -1830,11 +2069,14 @@ return function(context)
     function manager:Capabilities()
         local base = getgenv and getgenv() or (getfenv and getfenv(0) or _G)
         local rows = {}
-        for _, name in ipairs({'loadstring','setfenv','getgenv','hookmetamethod','hookfunction','newcclosure','getnamecallmethod','checkcaller','getrawmetatable','getconnections','gethui','request','writefile'}) do
+        for _, name in ipairs({'loadstring','setfenv','getgenv','hookmetamethod','hookfunction','newcclosure','getnamecallmethod','checkcaller','getrawmetatable','getconnections','gethui','request','readfile','writefile','isfile','listfiles','getcustomasset'}) do
             local value = base[name] or _G[name]
             rows[#rows+1] = name .. ': ' .. (type(value)=='function' and 'available' or 'missing')
         end
-        return table.concat(rows, '\n') .. '\nPresence check only; no hooks or remotes are called.'
+        local network = request or http_request or (syn and syn.request)
+        rows[#rows+1] = 'HTTP request (including aliases): ' .. (type(network)=='function' and 'available' or 'missing')
+        rows[#rows+1] = 'Persistent library: ' .. (type(readfile)=='function' and type(writefile)=='function' and 'available' or 'session only')
+        return table.concat(rows, '\n') .. '\nPresence check only; native behavior is not tested.' 
     end
     function manager:Run(id)
         assert(self.Alive, 'Script Maker is unloaded')
@@ -2042,12 +2284,12 @@ return function(context)
             local ids={};for id in pairs(manager.Records) do ids[#ids+1]=id end;table.sort(ids)
             for index,id in ipairs(ids) do if id==manager.Selected then manager.Selected=ids[index%#ids+1];current=nil;changed();return end end
         end)
-        settingsButton = ui('TextButton', {Name='WorkspaceSettings', Position=UDim2.new(1,-106,0,8), Size=UDim2.fromOffset(92,30), BackgroundColor3=Color3.fromRGB(40,40,48), Text='Settings', TextColor3=Color3.fromRGB(230,230,238), Font=Enum.Font.GothamMedium, TextSize=13}, workspaceFrame)
+        settingsButton = ui('TextButton', {Name='WorkspaceSettings', Position=UDim2.new(1,-106,0,8), Size=UDim2.fromOffset(92,30), BackgroundColor3=Color3.fromRGB(40,40,48), Text='Tools', TextColor3=Color3.fromRGB(230,230,238), Font=Enum.Font.GothamMedium, TextSize=13}, workspaceFrame)
         ui('UICorner', {CornerRadius=UDim.new(0,6)}, settingsButton)
         scriptList = ui('ScrollingFrame', {Name='ScriptDocuments', Position=UDim2.fromOffset(8,48), Size=UDim2.new(0,142,1,-56), ClipsDescendants=true, BackgroundColor3=Color3.fromRGB(23,23,29), BorderSizePixel=0, ScrollBarThickness=3, AutomaticCanvasSize=Enum.AutomaticSize.Y, CanvasSize=UDim2.fromOffset(0,0)}, workspaceFrame)
         local frame = ui('Frame', {Name='ParawareScriptEditor', ClipsDescendants=true, Position=UDim2.fromOffset(158,48), Size=UDim2.new(1,-166,1,-56), BackgroundColor3=Color3.fromRGB(12,12,16), BorderSizePixel=0}, workspaceFrame)
         editorPanel = frame
-        for index, action in ipairs({{'Run', function() manager:Run(manager.Selected) end}, {'Disable', function() manager:Stop(manager.Selected,'Disabled') end}, {'Kill', function() manager:Stop(manager.Selected,'Killed') end}}) do
+        for index, action in ipairs({{'Run', function() manager:Run(manager.Selected) end}, {'Disable', function() manager:Stop(manager.Selected,'Disabled') end}, {'Save', function() assert(manager.SaveLibrarySelected, 'Library is unavailable'); manager:SaveLibrarySelected() end}}) do
             local callback = action[2]
             local button = ui('TextButton', {Position=UDim2.new((index-1)/3,8,0,8), Size=UDim2.new(1/3,-16,0,30), BackgroundColor3=index==1 and Color3.fromRGB(65,76,91) or Color3.fromRGB(38,38,44), Text=action[1], TextColor3=Color3.fromRGB(240,240,245), Font=Enum.Font.GothamMedium, TextSize=13}, frame)
             ui('UICorner', {CornerRadius=UDim.new(0,6)}, button)
@@ -2099,7 +2341,7 @@ return function(context)
         container.Parent=workspaceFrame;container.Position=UDim2.fromOffset(8,46);container.AnchorPoint=Vector2.new(0,0);container.Size=UDim2.new(1,-16,1,-54);container.Visible=false
         local function toggleSettings()
             container.Visible=not container.Visible; frame.Visible=not container.Visible;scriptList.Visible=not container.Visible
-            settingsButton.Text=container.Visible and 'Editor' or 'Settings'
+            settingsButton.Text=container.Visible and 'Editor' or 'Tools'
         end
         context.Connect(settingsButton.MouseButton1Click,toggleSettings)
         layoutWorkspace=function()
@@ -2162,7 +2404,7 @@ return function(context)
             modePicker:Select(record.Mode); picker:Select(label(record)); modeCache=record.Mode;selectionCache=record.Id
         end
         selecting=false
-        if documentTitle then documentTitle.Text=record.Name .. '  /  ' .. (record.Mode=='Managed' and 'Managed' or 'Executor') .. '  (switch)' end
+        if documentTitle then documentTitle.Text=record.Name .. (record.SavedCode ~= record.Code and ' *' or '') .. '  /  ' .. (record.Mode=='Managed' and 'Managed' or 'Executor') .. '  (switch)' end
         if editor and current~=record.Id then syncing=true; editor.Text=record.Code; editor.CursorPosition=1; current=record.Id; syncing=false
             local lines={'1'}; for _ in record.Code:gmatch('\n') do lines[#lines+1]=tostring(#lines+1) end; gutter.Text=table.concat(lines,'\n')
         end
@@ -8627,6 +8869,7 @@ connect(Input.TouchTapInWorld, function(position, processed)
 end)
 pickerHighlight = Instance.new("Highlight")
 pickerHighlight.Name = "ParawareObjectPicker"
+pickerHighlight.Enabled = state.Picker
 pickerHighlight.FillColor = selectionStyle.Fill
 pickerHighlight.OutlineColor = selectionStyle.Outline
 pickerHighlight.FillTransparency = 0.85
