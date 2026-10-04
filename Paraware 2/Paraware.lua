@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.8.1",
+    Version = "1.9.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -363,6 +363,148 @@ return { Image = "rbxassetid://135148380892747", Size = 32, Columns = 18, Classe
     StringValue = 284,
     Vector3Value = 284,
 } }
+
+end)()
+local createPropertyEditor
+createPropertyEditor = (function()
+return function(ctx)
+    local editor={Alive=true,UndoStack={}}
+    local rows,connections,views={},{},{}
+    local readOnly={ClassName=true,Parent=true,Mass=true,AbsolutePosition=true,AbsoluteSize=true,TimeLength=true,IsPlaying=true}
+    local appearance={Color=true,Material=true,Transparency=true,LocalTransparencyModifier=true,CastShadow=true,BackgroundColor3=true,BackgroundTransparency=true,TextColor3=true,TextSize=true,Font=true,Image=true,ImageColor3=true,ImageTransparency=true,MeshId=true,TextureID=true,TextureId=true,Texture=true}
+    local behavior={Archivable=true,Anchored=true,CanCollide=true,CanTouch=true,CanQuery=true,Enabled=true,Visible=true,Looped=true,ResetOnSpawn=true,IgnoreGuiInset=true}
+    local function ui(kind,values,parent)
+        local object=Instance.new(kind);for key,value in pairs(values) do object[key]=value end;object.Parent=parent;return object
+    end
+    local function bind(signal,fn)
+        connections[#connections+1]=signal:Connect(function(...) if editor.Alive then fn(...) end end)
+    end
+    local function text(value)
+        local kind=typeof(value)
+        if kind=='Color3' then return string.format('#%02X%02X%02X',math.floor(value.R*255+0.5),math.floor(value.G*255+0.5),math.floor(value.B*255+0.5)) end
+        if kind=='Vector3' then return string.format('%g, %g, %g',value.X,value.Y,value.Z) end
+        if kind=='Vector2' then return string.format('%g, %g',value.X,value.Y) end
+        if kind=='UDim' then return string.format('%g, %g',value.Scale,value.Offset) end
+        if kind=='UDim2' then return string.format('%g, %g, %g, %g',value.X.Scale,value.X.Offset,value.Y.Scale,value.Y.Offset) end
+        if kind=='CFrame' then return table.concat({value:GetComponents()},', ') end
+        return tostring(value)
+    end
+    local function numbers(raw,count)
+        local result={}
+        for piece in raw:gmatch('[^,]+') do
+            local number=tonumber(piece:match('^%s*(.-)%s*$'))
+            assert(number and number==number and math.abs(number)<math.huge,'Enter finite numbers separated by commas.')
+            result[#result+1]=number
+        end
+        assert(#result==count,'Expected '..count..' comma-separated numbers.')
+        return table.unpack(result)
+    end
+    local supported={string=true,number=true,boolean=true,Vector2=true,Vector3=true,Color3=true,UDim=true,UDim2=true,CFrame=true,EnumItem=true}
+    function editor:Parse(raw,current)
+        local kind=typeof(current)
+        if kind=='string' then return raw end
+        if kind=='number' then local n=tonumber(raw);assert(n and n==n and math.abs(n)<math.huge,'Enter a finite number.');return n end
+        if kind=='boolean' then assert(raw=='true' or raw=='false','Choose true or false.');return raw=='true' end
+        if kind=='Vector3' then return Vector3.new(numbers(raw,3)) end
+        if kind=='Vector2' then return Vector2.new(numbers(raw,2)) end
+        if kind=='UDim' then return UDim.new(numbers(raw,2)) end
+        if kind=='UDim2' then return UDim2.new(numbers(raw,4)) end
+        if kind=='CFrame' then local count=0;for _ in raw:gmatch('[^,]+') do count=count+1 end;assert(count==3 or count==12,'CFrame needs 3 position values or 12 components.');return CFrame.new(numbers(raw,count)) end
+        if kind=='Color3' then
+            local hex=raw:match('^%s*#?(%x%x%x%x%x%x)%s*$')
+            if hex then return Color3.fromRGB(tonumber(hex:sub(1,2),16),tonumber(hex:sub(3,4),16),tonumber(hex:sub(5,6),16)) end
+            local r,g,b=numbers(raw,3);assert(r>=0 and r<=255 and g>=0 and g<=255 and b>=0 and b<=255,'Color channels must be 0–255.');return Color3.fromRGB(r,g,b)
+        end
+        if kind=='EnumItem' then
+            local wanted=raw:match('([^%.%s]+)%s*$')
+            for _,item in ipairs(current.EnumType:GetEnumItems()) do if item.Name:lower()==(wanted or ''):lower() then return item end end
+            error('Enter a valid '..tostring(current.EnumType)..' item name.')
+        end
+        error('This value type is read-only.')
+    end
+    function editor:Apply(object,key,raw,attribute)
+        if not self.Alive or object~=ctx.GetFocus() then return false end
+        local ok,err=pcall(function()
+            assert(attribute or not readOnly[key],'This property is read-only.')
+            assert(attribute or ctx.IsProperty(key),'This property is not exposed for editing.')
+            local old
+            if attribute then old=object:GetAttribute(key) else old=object[key] end
+            assert(old~=nil,'Value is no longer available.')
+            local value=self:Parse(raw,old)
+            if value==old then return end
+            if attribute then object:SetAttribute(key,value) else object[key]=value end
+            self.UndoStack[#self.UndoStack+1]={Object=object,Key=key,Value=old,Attribute=attribute}
+            if #self.UndoStack>32 then table.remove(self.UndoStack,1) end
+        end)
+        ctx.Notify(ok and ('Updated '..key) or ('Could not update '..key..': '..tostring(err)))
+        ctx.OnEdit();self:Render();return ok
+    end
+    function editor:Undo()
+        local entry=self.UndoStack[#self.UndoStack]
+        if not entry then ctx.Notify('No property edits to undo.');return end
+        local ok,err=pcall(function() if entry.Attribute then entry.Object:SetAttribute(entry.Key,entry.Value) else entry.Object[entry.Key]=entry.Value end end)
+        if ok then table.remove(self.UndoStack);ctx.Notify('Restored '..entry.Key) else ctx.Notify('Undo failed: '..tostring(err)) end
+        ctx.OnEdit();self:Render()
+    end
+    local layout=ui('UIListLayout',{Padding=UDim.new(0,1),SortOrder=Enum.SortOrder.LayoutOrder},ctx.Parent)
+    local function row(height)
+        local object=ui('Frame',{Size=UDim2.new(1,-6,0,height),BackgroundColor3=Color3.fromRGB(29,29,35),BorderSizePixel=0,LayoutOrder=#rows+1},ctx.Parent)
+        rows[#rows+1]=object;return object
+    end
+    local function label(value,parent,position,size)
+        return ui('TextLabel',{Text=value,Position=position,Size=size,BackgroundTransparency=1,TextSize=11,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(210,210,220),TextXAlignment=Enum.TextXAlignment.Left,TextTruncate=Enum.TextTruncate.AtEnd},parent)
+    end
+    function editor:Sync()
+        local focus=ctx.Input and ctx.Input:GetFocusedTextBox()
+        for _,view in ipairs(views) do
+            if view.Field~=focus then
+                local ok,value=pcall(function() if view.Attribute then return view.Object:GetAttribute(view.Key) else return view.Object[view.Key] end end)
+                if ok and value~=nil then view.Field.Text=typeof(value)=='boolean' and view.Editable and (value and '☑' or '☐') or text(value) end
+            end
+        end
+    end
+    function editor:Render()
+        for _,connection in ipairs(connections) do connection:Disconnect() end;connections={}
+        for _,object in ipairs(rows) do object:Destroy() end;rows={};views={}
+        local object=ctx.GetFocus()
+        if not object then label('Select an instance to edit its properties.',row(30),UDim2.fromOffset(6,0),UDim2.new(1,-12,1,0));return end
+        local groups={Appearance={},Data={},Behavior={},Attributes={}}
+        for _,entry in ipairs(ctx.GetEntries(object)) do
+            local group=entry.Attribute and 'Attributes' or appearance[entry.Key] and 'Appearance' or behavior[entry.Key] and 'Behavior' or 'Data'
+            groups[group][#groups[group]+1]=entry
+        end
+        for _,group in ipairs({'Appearance','Data','Behavior','Attributes'}) do
+            if #groups[group]>0 then
+                local heading=row(23);heading.BackgroundColor3=Color3.fromRGB(38,38,45)
+                label(group,heading,UDim2.fromOffset(6,0),UDim2.new(1,-12,1,0))
+                for _,entry in ipairs(groups[group]) do
+                    local key,value,attribute=entry.Key,entry.Value,entry.Attribute
+                    local line=row(28)
+                    label(key,line,UDim2.fromOffset(6,0),UDim2.new(0.44,-10,1,0))
+                    local editable=(attribute or not readOnly[key]) and supported[typeof(value)]
+                    if not editable then
+                        local field=label(text(value),line,UDim2.new(0.44,2,0,0),UDim2.new(0.56,-8,1,0));field.TextColor3=Color3.fromRGB(145,145,155)
+                        views[#views+1]={Field=field,Object=object,Key=key,Attribute=attribute}
+                    elseif typeof(value)=='boolean' then
+                        local field=ui('TextButton',{Name='Property_'..key,Text=value and '☑' or '☐',Position=UDim2.new(0.44,2,0,2),Size=UDim2.new(0.56,-8,1,-4),BackgroundColor3=Color3.fromRGB(34,34,41),TextColor3=Color3.fromRGB(140,210,165),TextSize=17,Font=Enum.Font.Gotham,BorderSizePixel=0},line)
+                        views[#views+1]={Field=field,Object=object,Key=key,Attribute=attribute,Editable=true}
+                        bind(field.Activated,function() local current;if attribute then current=object:GetAttribute(key) else current=object[key] end;self:Apply(object,key,tostring(not current),attribute) end)
+                    else
+                        local field=ui('TextBox',{Name='Property_'..key,Text=text(value),Position=UDim2.new(0.44,2,0,2),Size=UDim2.new(0.56,-8,1,-4),ClearTextOnFocus=false,BackgroundColor3=Color3.fromRGB(34,34,41),TextColor3=Color3.fromRGB(240,240,245),TextSize=11,Font=Enum.Font.Code,TextXAlignment=Enum.TextXAlignment.Left,BorderSizePixel=0},line)
+                        views[#views+1]={Field=field,Object=object,Key=key,Attribute=attribute,Editable=true}
+                        bind(field.FocusLost,function() if field.Text~=text(value) then self:Apply(object,key,field.Text,attribute) end end)
+                    end
+                end
+            end
+        end
+        local note=row(34);label('Edits affect this client. Blur a field to apply.',note,UDim2.fromOffset(6,0),UDim2.new(1,-12,1,0))
+    end
+    function editor:Unload()
+        self.Alive=false;for _,connection in ipairs(connections) do connection:Disconnect() end
+        for _,object in ipairs(rows) do object:Destroy() end;layout:Destroy();self.UndoStack={}
+    end
+    return editor
+end
 
 end)()
 local createExplorer
@@ -1382,7 +1524,7 @@ local function build()
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
-    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Connect = connect,
+    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Input = Input, Connect = connect,
         Notify = notify, OwnUI = ownUI, DecodeImage = decodeBase64, GetSelection = function() return selected end,
         ToggleSelection = toggleSelection, ClearSelection = clearSelection,
         Export = function() exportSelection() end,
@@ -1695,6 +1837,7 @@ end
 createExplorer = (function()
 return function(ctx)
     local explorer = { Alive = true, Root = game, Focus = nil, Multiple = true, Search = "" }
+    local propertyEditor
     local rowConnections, focusConnection = {}, nil
     local expanded, rootConnections, rows = setmetatable({}, {__mode="k"}), {}, {}
     local busy, queued, frame, treeScroll, propertyScroll, propertyText, treeTitle, exportButton, rootButton, rootMenu
@@ -1721,7 +1864,7 @@ return function(ctx)
     local propertyQuery = ""
     local fields = {"Name","ClassName","Parent","Archivable","Position","Size","CFrame","Orientation","Color","Material","Transparency","LocalTransparencyModifier","Anchored","CanCollide","CanTouch","CanQuery","Mass","CastShadow","MeshId","TextureID","TextureId","Value","Enabled","Visible","AbsolutePosition","AbsoluteSize","AnchorPoint","BackgroundColor3","BackgroundTransparency","Text","TextColor3","TextSize","Font","Image","ImageColor3","ImageTransparency","ZIndex","DisplayOrder","IgnoreGuiInset","ResetOnSpawn","CanvasSize","CanvasPosition","SoundId","Volume","PlaybackSpeed","TimePosition","TimeLength","Looped","IsPlaying","Texture","Rate","Lifetime","Speed","Brightness","LightEmission","Attachment0","Attachment1","WalkSpeed","JumpPower","JumpHeight","Health","MaxHealth","FieldOfView","CameraType","CameraSubject"}
     function explorer:Properties(object)
-        if not object then return "Click an instance to inspect its readable properties.\nProperties are read-only. Script source is not read." end
+        if not object then return "Click an instance to inspect its readable properties.\nSelect a value to edit it. Script source is not read." end
         local lines = {path(object), "Class: " .. class(object), ""}
         for _, key in ipairs(fields) do
             local ok, value = pcall(function() return object[key] end)
@@ -1754,10 +1897,11 @@ return function(ctx)
         self.Focus=object
         if object and object.Changed then
             focusConnection=object.Changed:Connect(function()
-                if explorer.Alive and explorer.Focus==object and propertyText then propertyText.Text=explorer:Properties(object) end
+                if explorer.Alive and explorer.Focus==object and propertyText then propertyText.Text=explorer:Properties(object);if propertyEditor then propertyEditor:Sync() end end
             end)
         end
         if propertyText then propertyText.Text=self:Properties(object) end
+        if propertyEditor then propertyEditor:Render() end
     end
     function explorer:Choose(object)
         if internal(object) then return end
@@ -1873,11 +2017,32 @@ return function(ctx)
         local ok=pcall(setclipboard,path(explorer.Focus));ctx.Notify(ok and "Instance path copied." or "Could not copy path.")
     end)
     local propertySearch=ui("TextBox",{Name="ExplorerPropertySearch",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,0,26),Text="",PlaceholderText="Filter properties…",ClearTextOnFocus=false,TextColor3=Color3.fromRGB(240,240,245),PlaceholderColor3=Color3.fromRGB(150,150,160),BackgroundColor3=Color3.fromRGB(30,30,37),TextSize=12,Font=Enum.Font.Gotham,BorderSizePixel=0},propsPane)
-    ctx.Connect(propertySearch:GetPropertyChangedSignal("Text"),function() propertyQuery=propertySearch.Text:lower():sub(1,80);propertyText.Text=explorer:Properties(explorer.Focus) end)
+    ctx.Connect(propertySearch:GetPropertyChangedSignal("Text"),function() propertyQuery=propertySearch.Text:lower():sub(1,80);propertyText.Text=explorer:Properties(explorer.Focus);if propertyEditor then propertyEditor:Render() end end)
     treeScroll=ui("ScrollingFrame",{Name="ExplorerHierarchy",Position=UDim2.fromOffset(0,26),Size=UDim2.new(1,0,1,-26),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},treePane)
     ui("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder},treeScroll)
     propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.fromOffset(6,60),Size=UDim2.new(1,-12,1,-66),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
-    propertyText=ui("TextLabel",{Name="ExplorerPropertyText",Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=explorer:Properties(nil),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(225,225,232),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1},propertyScroll)
+    propertyText=ui("TextLabel",{Name="ExplorerPropertyText",Visible=false,Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=explorer:Properties(nil),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(225,225,232),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1},propertyScroll)
+    local allowedProperties={};for _,key in ipairs(fields) do allowedProperties[key]=true end
+    propertyEditor=createPropertyEditor({Parent=propertyScroll,Input=ctx.Input,GetFocus=function() return explorer.Focus end,Notify=ctx.Notify,
+        IsProperty=function(key) return allowedProperties[key] end,
+        OnEdit=function() propertyText.Text=explorer:Properties(explorer.Focus);deferRefresh() end,
+        GetEntries=function(object)
+            local entries={}
+            for _,key in ipairs(fields) do
+                local ok,value=pcall(function() return object[key] end)
+                if ok and value~=nil and (propertyQuery=="" or key:lower():find(propertyQuery,1,true)) then entries[#entries+1]={Key=key,Value=value} end
+            end
+            local ok,attributes=pcall(object.GetAttributes,object)
+            if ok then
+                local keys={};for key in pairs(attributes) do keys[#keys+1]=key end;table.sort(keys)
+                for index,key in ipairs(keys) do if index>50 then break end;if propertyQuery=="" or key:lower():find(propertyQuery,1,true) then entries[#entries+1]={Key=key,Value=attributes[key],Attribute=true} end end
+            end
+            return entries
+        end})
+    explorer.PropertyEditor=propertyEditor
+    propertyEditor:Render()
+    button("Undo edit",propsPane,UDim2.fromOffset(6,58),UDim2.new(1,-12,0,24),function() propertyEditor:Undo() end)
+    propertyScroll.Position=UDim2.fromOffset(6,88);propertyScroll.Size=UDim2.new(1,-12,1,-94)
     rootMenu=ui("ScrollingFrame",{Name="ExplorerRootMenu",Visible=false,Position=UDim2.fromOffset(8,40),Size=UDim2.fromOffset(210,math.min(300,#roots*32)),BackgroundColor3=Color3.fromRGB(35,35,43),BorderSizePixel=0,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,ZIndex=20},frame)
     ui("UIListLayout",{Padding=UDim.new(0,2)},rootMenu)
     for _,object in ipairs(roots) do
@@ -1924,7 +2089,7 @@ return function(ctx)
         busy=false
     end
     function explorer:Unload()
-        self.Alive=false;disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
+        self.Alive=false;propertyEditor:Unload();disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
     end
     ctx.Connect(viewport:GetPropertyChangedSignal("Visible"),deferRefresh)
     explorer:SetRoot(game)
@@ -2225,6 +2390,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.9.0", Date = "2026-10-04", Title = "Editable properties", Changes = "Added typed property and existing-attribute editing, boolean checkboxes, grouped rows and undo. Roblox read-only properties remain locked." },
     { Version = "1.8.1", Date = "2026-10-04", Title = "Explorer arrows", Changes = "Added supplied right/down PNG arrows with an embedded fallback and a separate expansion click area." },
     { Version = "1.8.0", Date = "2026-10-04", Title = "Service Explorer", Changes = "Removed model preview. Added Dex++ class icons, a game service tree, property filtering and instance path copy." },
     { Version = "1.7.1", Date = "2026-10-04", Title = "Explorer model preview", Changes = "Click models or parts to preview isolated geometry with a slow spin and pause control." },
