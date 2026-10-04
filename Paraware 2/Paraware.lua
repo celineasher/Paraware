@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.7.1",
+    Version = "1.8.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -14,6 +14,349 @@ local Config = {
     WindUIUrl = "https://raw.githubusercontent.com/Footagesus/WindUI/7dd8a34a6bb59635c7b5f18ce9d46558a8cde138/dist/main.lua",
     ExporterUrl = "https://raw.githubusercontent.com/luau/UniversalSynSaveInstance/a6c93592f03791e6971261ee5586fba0a367b4b4/saveinstance.luau",
 }
+local explorerIcons
+explorerIcons = (function()
+--[[
+MIT License
+
+Copyright (c) 2025 Chillz
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+]]
+-- Class icon indices from DexPlusPlus stable 3.0; see licenses/DexPlusPlus-MIT.txt.
+return { Image = "rbxassetid://135148380892747", Size = 32, Columns = 18, Classes = {
+    Accessory = 1,
+    Actor = 2,
+    AdGui = 3,
+    AdPortal = 4,
+    AirController = 5,
+    AlignOrientation = 6,
+    AlignPosition = 7,
+    AngularVelocity = 8,
+    Animation = 9,
+    AnimationConstraint = 10,
+    AnimationController = 11,
+    AnimationFromVideoCreatorService = 12,
+    Animator = 13,
+    ArcHandles = 14,
+    Atmosphere = 15,
+    Attachment = 16,
+    AudioAnalyzer = 17,
+    AudioChannelMixer = 18,
+    AudioChannelSplitter = 19,
+    AudioChorus = 20,
+    AudioCompressor = 21,
+    AudioDeviceInput = 22,
+    AudioDeviceOutput = 23,
+    AudioDistortion = 24,
+    AudioEcho = 25,
+    AudioEmitter = 26,
+    AudioEqualizer = 27,
+    AudioFader = 28,
+    AudioFilter = 29,
+    AudioFlanger = 30,
+    AudioGate = 31,
+    AudioLimiter = 32,
+    AudioListener = 33,
+    AudioPitchShifter = 34,
+    AudioPlayer = 35,
+    AudioRecorder = 36,
+    AudioReverb = 37,
+    AudioTextToSpeech = 38,
+    AuroraScript = 39,
+    AvatarEditorService = 40,
+    AvatarSettings = 41,
+    Backpack = 42,
+    BallSocketConstraint = 43,
+    BasePlate = 44,
+    Beam = 45,
+    BillboardGui = 46,
+    BindableEvent = 47,
+    BindableFunction = 48,
+    BlockMesh = 49,
+    BloomEffect = 50,
+    BlurEffect = 51,
+    BodyAngularVelocity = 52,
+    BodyColors = 53,
+    BodyForce = 54,
+    BodyGyro = 55,
+    BodyPosition = 56,
+    BodyThrust = 57,
+    BodyVelocity = 58,
+    Bone = 59,
+    BoolValue = 60,
+    BoxHandleAdornment = 61,
+    Breakpoint = 62,
+    BrickColorValue = 63,
+    BubbleChatConfiguration = 64,
+    Buggaroo = 65,
+    Camera = 66,
+    CanvasGroup = 67,
+    CFrameValue = 68,
+    ChannelTabsConfiguration = 69,
+    CharacterControllerManager = 70,
+    CharacterMesh = 71,
+    Chat = 72,
+    ChatInputBarConfiguration = 73,
+    ChatWindowConfiguration = 74,
+    ChorusSoundEffect = 75,
+    Class = 76,
+    Cleanup = 77,
+    ClickDetector = 78,
+    ClientReplicator = 79,
+    ClimbController = 80,
+    Clouds = 81,
+    Color = 82,
+    ColorCorrectionEffect = 83,
+    CompressorSoundEffect = 84,
+    ConeHandleAdornment = 85,
+    Configuration = 86,
+    Constant = 87,
+    Constructor = 88,
+    Controller = 89,
+    CoreGui = 90,
+    CornerWedgePart = 91,
+    CylinderHandleAdornment = 92,
+    CylindricalConstraint = 93,
+    Decal = 94,
+    DepthOfFieldEffect = 95,
+    Dialog = 96,
+    DialogChoice = 97,
+    DistortionSoundEffect = 98,
+    DragDetector = 99,
+    EchoSoundEffect = 100,
+    EditableImage = 101,
+    EditableMesh = 102,
+    Enum = 103,
+    EnumMember = 104,
+    EqualizerSoundEffect = 105,
+    Event = 106,
+    Explosion = 107,
+    FaceControls = 108,
+    Field = 109,
+    File = 110,
+    Fire = 111,
+    FlangeSoundEffect = 112,
+    Folder = 113,
+    ForceField = 114,
+    Frame = 115,
+    Function = 116,
+    GameSettings = 117,
+    GroundController = 118,
+    Handles = 119,
+    HapticEffect = 120,
+    HapticService = 121,
+    HeightmapImporterService = 122,
+    Highlight = 123,
+    HingeConstraint = 124,
+    Humanoid = 125,
+    HumanoidDescription = 126,
+    IKControl = 127,
+    ImageButton = 128,
+    ImageHandleAdornment = 129,
+    ImageLabel = 130,
+    InputAction = 131,
+    InputBinding = 132,
+    InputContext = 133,
+    Interface = 134,
+    IntersectOperation = 135,
+    Keyword = 136,
+    Lighting = 137,
+    LinearVelocity = 138,
+    LineForce = 139,
+    LineHandleAdornment = 140,
+    LocalFile = 141,
+    LocalizationService = 142,
+    LocalizationTable = 143,
+    LocalScript = 144,
+    MaterialService = 145,
+    MaterialVariant = 146,
+    MemoryStoreService = 147,
+    MeshPart = 148,
+    Meshparts = 149,
+    MessagingService = 150,
+    Method = 151,
+    Model = 152,
+    Modelgroups = 153,
+    Module = 154,
+    ModuleScript = 155,
+    Motor6D = 156,
+    NegateOperation = 157,
+    NetworkClient = 158,
+    NoCollisionConstraint = 159,
+    Operator = 160,
+    PackageLink = 161,
+    Pants = 162,
+    Part = 163,
+    ParticleEmitter = 164,
+    Path2D = 165,
+    PathfindingLink = 166,
+    PathfindingModifier = 167,
+    PathfindingService = 168,
+    PitchShiftSoundEffect = 169,
+    Place = 170,
+    Placeholder = 171,
+    Plane = 172,
+    PlaneConstraint = 173,
+    Player = 174,
+    Players = 175,
+    PluginGuiService = 176,
+    PointLight = 177,
+    PrismaticConstraint = 178,
+    Property = 179,
+    ProximityPrompt = 180,
+    PublishService = 181,
+    Reference = 182,
+    RemoteEvent = 183,
+    RemoteFunction = 184,
+    RenderingTest = 185,
+    ReplicatedFirst = 186,
+    ReplicatedScriptService = 187,
+    ReplicatedStorage = 188,
+    ReverbSoundEffect = 189,
+    RigidConstraint = 190,
+    RobloxPluginGuiService = 191,
+    RocketPropulsion = 192,
+    RodConstraint = 193,
+    RopeConstraint = 194,
+    Rotate = 195,
+    ScreenGui = 196,
+    Script = 197,
+    ScrollingFrame = 198,
+    Seat = 199,
+    Selected_Workspace = 200,
+    SelectionBox = 201,
+    SelectionSphere = 202,
+    ServerScriptService = 203,
+    ServerStorage = 204,
+    Service = 205,
+    Shirt = 206,
+    ShirtGraphic = 207,
+    SkinnedMeshPart = 208,
+    Sky = 209,
+    Smoke = 210,
+    Snap = 211,
+    Snippet = 212,
+    SocialService = 213,
+    Sound = 214,
+    SoundEffect = 215,
+    SoundGroup = 216,
+    SoundService = 217,
+    Sparkles = 218,
+    SpawnLocation = 219,
+    SpecialMesh = 220,
+    SphereHandleAdornment = 221,
+    SpotLight = 222,
+    SpringConstraint = 223,
+    StandalonePluginScripts = 224,
+    StarterCharacterScripts = 225,
+    StarterGui = 226,
+    StarterPack = 227,
+    StarterPlayer = 228,
+    StarterPlayerScripts = 229,
+    Struct = 230,
+    StyleDerive = 231,
+    StyleLink = 232,
+    StyleRule = 233,
+    StyleSheet = 234,
+    SunRaysEffect = 235,
+    SurfaceAppearance = 236,
+    SurfaceGui = 237,
+    SurfaceLight = 238,
+    SurfaceSelection = 239,
+    SwimController = 240,
+    TaskScheduler = 241,
+    Team = 242,
+    Teams = 243,
+    Terrain = 244,
+    TerrainDetail = 245,
+    TestService = 246,
+    TextBox = 247,
+    TextBoxService = 248,
+    TextButton = 249,
+    TextChannel = 250,
+    TextChatCommand = 251,
+    TextChatService = 252,
+    TextLabel = 253,
+    TextString = 254,
+    Texture = 255,
+    Tool = 256,
+    Torque = 257,
+    TorsionSpringConstraint = 258,
+    Trail = 259,
+    TremoloSoundEffect = 260,
+    TrussPart = 261,
+    TypeParameter = 262,
+    UGCValidationService = 263,
+    UIAspectRatioConstraint = 264,
+    UICorner = 265,
+    UIDragDetector = 266,
+    UIFlexItem = 267,
+    UIGradient = 268,
+    UIGridLayout = 269,
+    UIListLayout = 270,
+    UIPadding = 271,
+    UIPageLayout = 272,
+    UIScale = 273,
+    UISizeConstraint = 274,
+    UIStroke = 275,
+    UITableLayout = 276,
+    UITextSizeConstraint = 277,
+    UnionOperation = 278,
+    Unit = 279,
+    UniversalConstraint = 280,
+    UnreliableRemoteEvent = 281,
+    UpdateAvailable = 282,
+    UserService = 283,
+    Value = 284,
+    Variable = 285,
+    VectorForce = 286,
+    VehicleSeat = 287,
+    VideoDisplay = 288,
+    VideoFrame = 289,
+    VideoPlayer = 290,
+    ViewportFrame = 291,
+    VirtualUser = 292,
+    VoiceChannel = 293,
+    Voicechat = 294,
+    VoiceChatService = 295,
+    VRService = 296,
+    WedgePart = 297,
+    Weld = 298,
+    WeldConstraint = 299,
+    Wire = 300,
+    WireframeHandleAdornment = 301,
+    Workspace = 302,
+    WorldModel = 303,
+    WrapDeformer = 304,
+    WrapLayer = 305,
+    WrapTarget = 306,
+    Color3Value = 284,
+    IntValue = 284,
+    NumberValue = 284,
+    ObjectValue = 284,
+    RayValue = 284,
+    StringValue = 284,
+    Vector3Value = 284,
+} }
+
+end)()
 local createExplorer
 local scriptLibrary
 local createObjectPicker
@@ -1031,7 +1374,7 @@ local function build()
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
-    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, RunService = RunService, Connect = connect,
+    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Connect = connect,
         Notify = notify, OwnUI = ownUI, GetSelection = function() return selected end,
         ToggleSelection = toggleSelection, ClearSelection = clearSelection,
         Export = function() exportSelection() end,
@@ -1343,13 +1686,11 @@ end
 
 createExplorer = (function()
 return function(ctx)
-    local explorer = { Alive = true, Root = workspace, Focus = nil, Multiple = true, Search = "" }
+    local explorer = { Alive = true, Root = game, Focus = nil, Multiple = true, Search = "" }
     local rowConnections, focusConnection = {}, nil
     local expanded, rootConnections, rows = setmetatable({}, {__mode="k"}), {}, {}
     local busy, queued, frame, treeScroll, propertyScroll, propertyText, treeTitle, exportButton, rootButton, rootMenu
     local roots, rootLabels = {}, {}
-    local preview, previewWorld, previewCamera, previewHint, previewModel, previewCenter, previewRadius
-    local previewAngle, spinning = 0, true
     local function name(object)
         local ok, value = pcall(function() return object.Name end)
         return ok and tostring(value) or "Unavailable"
@@ -1369,13 +1710,14 @@ return function(ctx)
     local function internal(object)
         return ctx.OwnUI(object) or (frame and object.IsDescendantOf and object:IsDescendantOf(frame)) or ctx.IsInternal(object)
     end
+    local propertyQuery = ""
     local fields = {"Name","ClassName","Parent","Archivable","Position","Size","CFrame","Orientation","Color","Material","Transparency","LocalTransparencyModifier","Anchored","CanCollide","CanTouch","CanQuery","Mass","CastShadow","MeshId","TextureID","TextureId","Value","Enabled","Visible","AbsolutePosition","AbsoluteSize","AnchorPoint","BackgroundColor3","BackgroundTransparency","Text","TextColor3","TextSize","Font","Image","ImageColor3","ImageTransparency","ZIndex","DisplayOrder","IgnoreGuiInset","ResetOnSpawn","CanvasSize","CanvasPosition","SoundId","Volume","PlaybackSpeed","TimePosition","TimeLength","Looped","IsPlaying","Texture","Rate","Lifetime","Speed","Brightness","LightEmission","Attachment0","Attachment1","WalkSpeed","JumpPower","JumpHeight","Health","MaxHealth","FieldOfView","CameraType","CameraSubject"}
     function explorer:Properties(object)
         if not object then return "Click an instance to inspect its readable properties.\nProperties are read-only. Script source is not read." end
         local lines = {path(object), "Class: " .. class(object), ""}
         for _, key in ipairs(fields) do
             local ok, value = pcall(function() return object[key] end)
-            if ok and value ~= nil then
+            if ok and value ~= nil and (propertyQuery=="" or key:lower():find(propertyQuery,1,true)) then
                 local text = typeof(value)=="Instance" and path(value) or tostring(value)
                 lines[#lines+1] = key .. " = " .. text:gsub("\n"," "):sub(1,240)
             end
@@ -1385,7 +1727,7 @@ return function(ctx)
             if ok and next(attributes) then
                 lines[#lines+1]="";lines[#lines+1]="Attributes"
                 local keys={};for key in pairs(attributes) do keys[#keys+1]=key end;table.sort(keys)
-                for index,key in ipairs(keys) do if index>50 then break end;lines[#lines+1]=key.." = "..tostring(attributes[key]):sub(1,240) end
+                for index,key in ipairs(keys) do if index>50 then break end;if propertyQuery=="" or key:lower():find(propertyQuery,1,true) then lines[#lines+1]=key.." = "..tostring(attributes[key]):sub(1,240) end end
             end
         end
         return table.concat(lines,"\n")
@@ -1399,57 +1741,9 @@ return function(ctx)
         queued=true
         task.defer(function() queued=false;if explorer.Alive then explorer:Refresh() end end)
     end
-    function explorer:ClearPreview(message)
-        if previewModel then previewModel:Destroy();previewModel=nil end
-        previewCenter=nil
-        if preview then preview.Visible=false end
-        if previewHint then previewHint.Text=message or "Select a model or part to preview." end
-    end
-    function explorer:UpdatePreviewCamera()
-        if not previewCenter then return end
-        local size=preview.AbsoluteSize
-        local aspect=size and size.Y>0 and size.X/size.Y or 1
-        local vertical=math.rad(previewCamera.FieldOfView/2)
-        local halfAngle=math.min(vertical,math.atan(math.tan(vertical)*aspect))
-        local distance=previewRadius/math.sin(math.max(0.1,halfAngle))*1.15
-        local offset=Vector3.new(math.sin(previewAngle)*distance,distance*0.22,math.cos(previewAngle)*distance)
-        previewCamera.CFrame=CFrame.new(previewCenter+offset,previewCenter)
-    end
-    function explorer:Preview(object)
-        self:ClearPreview()
-        if not object or not (object:IsA("Model") or object:IsA("BasePart")) then return end
-        local clone
-        local ok=pcall(function()
-            if #object:GetDescendants()>1500 then error("Preview limit") end
-            clone=object:Clone()
-            assert(clone,"Clone unavailable")
-            local contents=clone:GetDescendants();table.insert(contents,clone)
-            local parts=0
-            for _,item in ipairs(contents) do
-                if item:IsA("BasePart") then
-                    parts=parts+1;item.Anchored=true;item.CanCollide=false;item.CanTouch=false;item.CanQuery=false
-                elseif item:IsA("LuaSourceContainer") or item:IsA("Script") or item:IsA("LocalScript") or item:IsA("ModuleScript") or item:IsA("Sound") then item:Destroy()
-                elseif item:IsA("ParticleEmitter") or item:IsA("Trail") or item:IsA("Beam") then item.Enabled=false end
-            end
-            assert(parts>0,"No geometry")
-            previewModel=Instance.new("Model");previewModel.Name="ExplorerPreviewModel"
-            clone.Parent=previewModel
-            local bounds,size=previewModel:GetBoundingBox()
-            previewCenter=bounds.Position;previewRadius=math.max(size.Magnitude/2,0.5)
-            previewModel.Parent=previewWorld
-            previewAngle=0;preview.Visible=true
-            previewHint.Text=name(object).." · 3D preview"
-            self:UpdatePreviewCamera()
-        end)
-        if not ok then
-            if clone then clone:Destroy() end
-            self:ClearPreview("Preview unavailable · choose a smaller, cloneable model.")
-        end
-    end
     function explorer:Inspect(object)
         if focusConnection then focusConnection:Disconnect();focusConnection=nil end
         self.Focus=object
-        self:Preview(object)
         if object and object.Changed then
             focusConnection=object.Changed:Connect(function()
                 if explorer.Alive and explorer.Focus==object and propertyText then propertyText.Text=explorer:Properties(object) end
@@ -1479,7 +1773,13 @@ return function(ctx)
     function explorer:VisibleRows()
         local result, scanned, truncated={},0,false
         local query=self.Search:lower()
-        local stack={{Object=self.Root,Depth=0}}
+        local stack={}
+        if self.Root==game then
+            local services=children(game)
+            local order={Workspace=1,Players=2,CoreGui=3,CorePackages=4,Lighting=5}
+            table.sort(services,function(a,b) local ar,br=order[class(a)] or 100,order[class(b)] or 100;return ar==br and name(a)<name(b) or ar<br end)
+            for i=#services,1,-1 do stack[#stack+1]={Object=services[i],Depth=0} end
+        else stack[1]={Object=self.Root,Depth=0} end
         while #stack>0 do
             local entry=table.remove(stack);local object=entry.Object
             if not internal(object) then
@@ -1514,7 +1814,7 @@ return function(ctx)
     end
     addRoot("Workspace",workspace)
     addRoot("PlayerGui",ctx.Player:FindFirstChild("PlayerGui"))
-    for _,label in ipairs({"ReplicatedStorage","Players","Lighting","SoundService","StarterGui","StarterPlayer","CoreGui"}) do
+    for _,label in ipairs({"Players","CoreGui","CorePackages","Lighting","MaterialService","NetworkClient","PlatformLibraries","ReplicatedFirst","ReplicatedStorage","StarterGui","StarterPack","StarterPlayer","Teams","SoundService","Chat","TextChatService","VoiceChatService","LocalizationService","TestService"}) do
         local ok,object=pcall(game.GetService,game,label);if ok then addRoot(label,object) end
     end
     addRoot("Game",game)
@@ -1523,7 +1823,7 @@ return function(ctx)
     if original then original.Visible=false end
     frame=ui("Frame",{Name="ParawareExplorer",Size=UDim2.new(1,-12,1,-12),Position=UDim2.fromOffset(6,6),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0,ClipsDescendants=true},viewport)
     ui("UICorner",{CornerRadius=UDim.new(0,10)},frame)
-    rootButton=button("Workspace ▾",frame,UDim2.fromOffset(8,8),UDim2.fromOffset(144,30),function() rootMenu.Visible=not rootMenu.Visible end)
+    rootButton=button("Game ▾",frame,UDim2.fromOffset(8,8),UDim2.fromOffset(144,30),function() rootMenu.Visible=not rootMenu.Visible end)
     local search=ui("TextBox",{Name="ExplorerSearch",Position=UDim2.fromOffset(160,8),Size=UDim2.new(1,-168,0,30),Text="",PlaceholderText="Search name or class in this root…",ClearTextOnFocus=false,TextColor3=Color3.fromRGB(240,240,245),PlaceholderColor3=Color3.fromRGB(150,150,160),BackgroundColor3=Color3.fromRGB(30,30,37),TextSize=12,Font=Enum.Font.Gotham,BorderSizePixel=0},frame)
     ui("UICorner",{CornerRadius=UDim.new(0,6)},search)
     ctx.Connect(search:GetPropertyChangedSignal("Text"),function() explorer.Search=search.Text:sub(1,80);deferRefresh() end)
@@ -1537,27 +1837,20 @@ return function(ctx)
     local treePane=ui("Frame",{Name="ExplorerTreePane",Position=UDim2.fromOffset(8,84),Size=UDim2.new(0.48,-12,1,-92),BackgroundColor3=Color3.fromRGB(24,24,29),BorderSizePixel=0,ClipsDescendants=true},frame)
     local propsPane=ui("Frame",{Name="ExplorerPropertiesPane",Position=UDim2.new(0.48,4,0,84),Size=UDim2.new(0.52,-12,1,-92),BackgroundColor3=Color3.fromRGB(24,24,29),BorderSizePixel=0,ClipsDescendants=true},frame)
     treeTitle=ui("TextLabel",{Size=UDim2.new(1,-12,0,24),Position=UDim2.fromOffset(6,0),Text="Hierarchy",TextSize=12,Font=Enum.Font.GothamMedium,TextColor3=Color3.fromRGB(215,215,225),TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1},treePane)
-    button("Properties · copy",propsPane,UDim2.fromOffset(4,0),UDim2.new(1,-8,0,24),function()
+    button("Properties · copy",propsPane,UDim2.fromOffset(4,0),UDim2.new(0.5,-6,0,24),function()
         if type(setclipboard)~="function" then ctx.Notify("Clipboard is unavailable.");return end
         local ok=pcall(setclipboard,explorer:Properties(explorer.Focus));ctx.Notify(ok and "Properties copied." or "Could not copy properties.")
     end)
+    button("Copy path",propsPane,UDim2.new(0.5,2,0,0),UDim2.new(0.5,-6,0,24),function()
+        if not explorer.Focus then ctx.Notify("Choose an instance first.");return end
+        if type(setclipboard)~="function" then ctx.Notify("Clipboard is unavailable.");return end
+        local ok=pcall(setclipboard,path(explorer.Focus));ctx.Notify(ok and "Instance path copied." or "Could not copy path.")
+    end)
+    local propertySearch=ui("TextBox",{Name="ExplorerPropertySearch",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,0,26),Text="",PlaceholderText="Filter properties…",ClearTextOnFocus=false,TextColor3=Color3.fromRGB(240,240,245),PlaceholderColor3=Color3.fromRGB(150,150,160),BackgroundColor3=Color3.fromRGB(30,30,37),TextSize=12,Font=Enum.Font.Gotham,BorderSizePixel=0},propsPane)
+    ctx.Connect(propertySearch:GetPropertyChangedSignal("Text"),function() propertyQuery=propertySearch.Text:lower():sub(1,80);propertyText.Text=explorer:Properties(explorer.Focus) end)
     treeScroll=ui("ScrollingFrame",{Name="ExplorerHierarchy",Position=UDim2.fromOffset(0,26),Size=UDim2.new(1,0,1,-26),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},treePane)
     ui("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder},treeScroll)
-    local previewPane=ui("Frame",{Name="ExplorerPreviewPane",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,0.38,0),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0,ClipsDescendants=true},propsPane)
-    preview=ui("ViewportFrame",{Name="ExplorerModelPreview",Size=UDim2.new(1,0,1,-26),BackgroundTransparency=1,Visible=false,Ambient=Color3.fromRGB(180,180,180),LightColor=Color3.fromRGB(255,245,235),LightDirection=Vector3.new(-1,-1,-1),BorderSizePixel=0},previewPane)
-    previewWorld=ui("WorldModel",{Name="ExplorerPreviewWorld"},preview)
-    previewCamera=ui("Camera",{FieldOfView=40},preview);preview.CurrentCamera=previewCamera
-    previewHint=ui("TextLabel",{Position=UDim2.new(0,6,1,-24),Size=UDim2.new(1,-90,0,22),Text="Select a model or part to preview.",TextSize=11,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(175,175,185),TextTruncate=Enum.TextTruncate.AtEnd,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1},previewPane)
-    local spinButton
-    spinButton=button("Pause",previewPane,UDim2.new(1,-76,1,-24),UDim2.fromOffset(70,22),function() spinning=not spinning;spinButton.Text=spinning and "Pause" or "Spin" end)
-    ctx.Connect(preview:GetPropertyChangedSignal("AbsoluteSize"),function() explorer:UpdatePreviewCamera() end)
-    ctx.Connect(ctx.RunService.RenderStepped,function(delta)
-        if explorer.Alive and previewCenter and viewport.Visible and spinning then
-            previewAngle=(previewAngle+math.min(delta,0.1)*math.rad(12))%(math.pi*2)
-            explorer:UpdatePreviewCamera()
-        end
-    end)
-    propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.new(0,6,0.38,34),Size=UDim2.new(1,-12,0.62,-40),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
+    propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.fromOffset(6,60),Size=UDim2.new(1,-12,1,-66),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
     propertyText=ui("TextLabel",{Name="ExplorerPropertyText",Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=explorer:Properties(nil),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(225,225,232),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1},propertyScroll)
     rootMenu=ui("ScrollingFrame",{Name="ExplorerRootMenu",Visible=false,Position=UDim2.fromOffset(8,40),Size=UDim2.fromOffset(210,math.min(300,#roots*32)),BackgroundColor3=Color3.fromRGB(35,35,43),BorderSizePixel=0,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,ZIndex=20},frame)
     ui("UIListLayout",{Padding=UDim.new(0,2)},rootMenu)
@@ -1585,14 +1878,17 @@ return function(ctx)
         local chosen={};local selection=ctx.GetSelection();for _,object in ipairs(selection) do chosen[object]=true end
         exportButton.Text="Export ("..#selection..")"
         local visible,truncated=self:VisibleRows()
-        treeTitle.Text="Hierarchy · "..#visible..(truncated and " (limited; narrow search)" or "")
+        treeTitle.Text="Explorer · "..#visible..(truncated and " (limited; narrow search)" or "")
         for index,entry in ipairs(visible) do
             local object,depth=entry.Object,math.min(entry.Depth,10)
-            local row=ui("Frame",{Size=UDim2.new(1,-6,0,28),BackgroundTransparency=1,LayoutOrder=index},treeScroll);rows[#rows+1]=row
+            local row=ui("Frame",{Size=UDim2.new(1,-6,0,24),BackgroundTransparency=1,LayoutOrder=index},treeScroll);rows[#rows+1]=row
             local hasChildren=#children(object)>0
-            local arrow=button(hasChildren and (expanded[object] and "▾" or "▸") or "·",row,UDim2.fromOffset(depth*10,0),UDim2.fromOffset(22,28),function() expanded[object]=not expanded[object];explorer:Refresh() end,true)
+            local arrow=button(hasChildren and (expanded[object] and "▾" or "▸") or "",row,UDim2.fromOffset(depth*10,0),UDim2.fromOffset(20,24),function() expanded[object]=not expanded[object];explorer:Refresh() end,true)
             arrow.BackgroundTransparency=1
-            local objectButton=button((chosen[object] and "✓ " or "")..name(object).."  ["..class(object).."]",row,UDim2.fromOffset(depth*10+24,0),UDim2.new(1,-depth*10-24,0,28),function() explorer:Choose(object) end,true)
+            local objectButton=button((chosen[object] and "✓ " or "")..name(object),row,UDim2.fromOffset(depth*10+22,0),UDim2.new(1,-depth*10-22,0,24),function() explorer:Choose(object) end,true)
+            local iconIndex=(explorerIcons.Classes[class(object)] or explorerIcons.Classes.Service or 1)-1
+            ui("ImageLabel",{Name="ExplorerClassIcon",Image=explorerIcons.Image,ImageRectSize=Vector2.new(explorerIcons.Size,explorerIcons.Size),ImageRectOffset=Vector2.new(iconIndex%explorerIcons.Columns*explorerIcons.Size,math.floor(iconIndex/explorerIcons.Columns)*explorerIcons.Size),Position=UDim2.fromOffset(depth*10+25,4),Size=UDim2.fromOffset(16,16),BackgroundTransparency=1},row)
+            ui("UIPadding",{PaddingLeft=UDim.new(0,24)},objectButton)
             objectButton.TextXAlignment=Enum.TextXAlignment.Left;objectButton.TextTruncate=Enum.TextTruncate.AtEnd
             objectButton.BackgroundColor3=chosen[object] and Color3.fromRGB(74,44,46) or Color3.fromRGB(31,31,37)
         end
@@ -1600,10 +1896,10 @@ return function(ctx)
         busy=false
     end
     function explorer:Unload()
-        self.Alive=false;self:ClearPreview();disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
+        self.Alive=false;disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
     end
     ctx.Connect(viewport:GetPropertyChangedSignal("Visible"),deferRefresh)
-    explorer:SetRoot(workspace)
+    explorer:SetRoot(game)
     return explorer
 end
 
@@ -1901,6 +2197,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.8.0", Date = "2026-10-04", Title = "Service Explorer", Changes = "Removed model preview. Added Dex++ class icons, a game service tree, property filtering and instance path copy." },
     { Version = "1.7.1", Date = "2026-10-04", Title = "Explorer model preview", Changes = "Click models or parts to preview isolated geometry with a slow spin and pause control." },
     { Version = "1.7.0", Date = "2026-10-04", Title = "Built-in Explorer",
       Changes = "Added hierarchy browsing, scoped search, read-only properties and attributes.\nAdded single/multiple selection and direct .rbxm export using the shared export selection.\nResponsive tree/property panels and bounded lazy browsing." },
