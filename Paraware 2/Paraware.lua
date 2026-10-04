@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "1.7.0",
+    Version = "1.7.1",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -1031,7 +1031,7 @@ local function build()
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
-    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Connect = connect,
+    Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, RunService = RunService, Connect = connect,
         Notify = notify, OwnUI = ownUI, GetSelection = function() return selected end,
         ToggleSelection = toggleSelection, ClearSelection = clearSelection,
         Export = function() exportSelection() end,
@@ -1348,6 +1348,8 @@ return function(ctx)
     local expanded, rootConnections, rows = setmetatable({}, {__mode="k"}), {}, {}
     local busy, queued, frame, treeScroll, propertyScroll, propertyText, treeTitle, exportButton, rootButton, rootMenu
     local roots, rootLabels = {}, {}
+    local preview, previewWorld, previewCamera, previewHint, previewModel, previewCenter, previewRadius
+    local previewAngle, spinning = 0, true
     local function name(object)
         local ok, value = pcall(function() return object.Name end)
         return ok and tostring(value) or "Unavailable"
@@ -1397,9 +1399,57 @@ return function(ctx)
         queued=true
         task.defer(function() queued=false;if explorer.Alive then explorer:Refresh() end end)
     end
+    function explorer:ClearPreview(message)
+        if previewModel then previewModel:Destroy();previewModel=nil end
+        previewCenter=nil
+        if preview then preview.Visible=false end
+        if previewHint then previewHint.Text=message or "Select a model or part to preview." end
+    end
+    function explorer:UpdatePreviewCamera()
+        if not previewCenter then return end
+        local size=preview.AbsoluteSize
+        local aspect=size and size.Y>0 and size.X/size.Y or 1
+        local vertical=math.rad(previewCamera.FieldOfView/2)
+        local halfAngle=math.min(vertical,math.atan(math.tan(vertical)*aspect))
+        local distance=previewRadius/math.sin(math.max(0.1,halfAngle))*1.15
+        local offset=Vector3.new(math.sin(previewAngle)*distance,distance*0.22,math.cos(previewAngle)*distance)
+        previewCamera.CFrame=CFrame.new(previewCenter+offset,previewCenter)
+    end
+    function explorer:Preview(object)
+        self:ClearPreview()
+        if not object or not (object:IsA("Model") or object:IsA("BasePart")) then return end
+        local clone
+        local ok=pcall(function()
+            if #object:GetDescendants()>1500 then error("Preview limit") end
+            clone=object:Clone()
+            assert(clone,"Clone unavailable")
+            local contents=clone:GetDescendants();table.insert(contents,clone)
+            local parts=0
+            for _,item in ipairs(contents) do
+                if item:IsA("BasePart") then
+                    parts=parts+1;item.Anchored=true;item.CanCollide=false;item.CanTouch=false;item.CanQuery=false
+                elseif item:IsA("LuaSourceContainer") or item:IsA("Script") or item:IsA("LocalScript") or item:IsA("ModuleScript") or item:IsA("Sound") then item:Destroy()
+                elseif item:IsA("ParticleEmitter") or item:IsA("Trail") or item:IsA("Beam") then item.Enabled=false end
+            end
+            assert(parts>0,"No geometry")
+            previewModel=Instance.new("Model");previewModel.Name="ExplorerPreviewModel"
+            clone.Parent=previewModel
+            local bounds,size=previewModel:GetBoundingBox()
+            previewCenter=bounds.Position;previewRadius=math.max(size.Magnitude/2,0.5)
+            previewModel.Parent=previewWorld
+            previewAngle=0;preview.Visible=true
+            previewHint.Text=name(object).." · 3D preview"
+            self:UpdatePreviewCamera()
+        end)
+        if not ok then
+            if clone then clone:Destroy() end
+            self:ClearPreview("Preview unavailable · choose a smaller, cloneable model.")
+        end
+    end
     function explorer:Inspect(object)
         if focusConnection then focusConnection:Disconnect();focusConnection=nil end
         self.Focus=object
+        self:Preview(object)
         if object and object.Changed then
             focusConnection=object.Changed:Connect(function()
                 if explorer.Alive and explorer.Focus==object and propertyText then propertyText.Text=explorer:Properties(object) end
@@ -1493,7 +1543,21 @@ return function(ctx)
     end)
     treeScroll=ui("ScrollingFrame",{Name="ExplorerHierarchy",Position=UDim2.fromOffset(0,26),Size=UDim2.new(1,0,1,-26),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},treePane)
     ui("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder},treeScroll)
-    propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,1,-34),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
+    local previewPane=ui("Frame",{Name="ExplorerPreviewPane",Position=UDim2.fromOffset(6,28),Size=UDim2.new(1,-12,0.38,0),BackgroundColor3=Color3.fromRGB(18,18,22),BorderSizePixel=0,ClipsDescendants=true},propsPane)
+    preview=ui("ViewportFrame",{Name="ExplorerModelPreview",Size=UDim2.new(1,0,1,-26),BackgroundTransparency=1,Visible=false,Ambient=Color3.fromRGB(180,180,180),LightColor=Color3.fromRGB(255,245,235),LightDirection=Vector3.new(-1,-1,-1),BorderSizePixel=0},previewPane)
+    previewWorld=ui("WorldModel",{Name="ExplorerPreviewWorld"},preview)
+    previewCamera=ui("Camera",{FieldOfView=40},preview);preview.CurrentCamera=previewCamera
+    previewHint=ui("TextLabel",{Position=UDim2.new(0,6,1,-24),Size=UDim2.new(1,-90,0,22),Text="Select a model or part to preview.",TextSize=11,Font=Enum.Font.Gotham,TextColor3=Color3.fromRGB(175,175,185),TextTruncate=Enum.TextTruncate.AtEnd,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1},previewPane)
+    local spinButton
+    spinButton=button("Pause",previewPane,UDim2.new(1,-76,1,-24),UDim2.fromOffset(70,22),function() spinning=not spinning;spinButton.Text=spinning and "Pause" or "Spin" end)
+    ctx.Connect(preview:GetPropertyChangedSignal("AbsoluteSize"),function() explorer:UpdatePreviewCamera() end)
+    ctx.Connect(ctx.RunService.RenderStepped,function(delta)
+        if explorer.Alive and previewCenter and viewport.Visible and spinning then
+            previewAngle=(previewAngle+math.min(delta,0.1)*math.rad(12))%(math.pi*2)
+            explorer:UpdatePreviewCamera()
+        end
+    end)
+    propertyScroll=ui("ScrollingFrame",{Name="ExplorerProperties",Position=UDim2.new(0,6,0.38,34),Size=UDim2.new(1,-12,0.62,-40),CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,BackgroundTransparency=1,BorderSizePixel=0,ClipsDescendants=true},propsPane)
     propertyText=ui("TextLabel",{Name="ExplorerPropertyText",Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,Text=explorer:Properties(nil),Font=Enum.Font.Code,TextSize=12,TextColor3=Color3.fromRGB(225,225,232),TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,BackgroundTransparency=1},propertyScroll)
     rootMenu=ui("ScrollingFrame",{Name="ExplorerRootMenu",Visible=false,Position=UDim2.fromOffset(8,40),Size=UDim2.fromOffset(210,math.min(300,#roots*32)),BackgroundColor3=Color3.fromRGB(35,35,43),BorderSizePixel=0,CanvasSize=UDim2.fromOffset(0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,ScrollBarThickness=3,ZIndex=20},frame)
     ui("UIListLayout",{Padding=UDim.new(0,2)},rootMenu)
@@ -1536,7 +1600,7 @@ return function(ctx)
         busy=false
     end
     function explorer:Unload()
-        self.Alive=false;disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
+        self.Alive=false;self:ClearPreview();disconnectRoot();if focusConnection then focusConnection:Disconnect() end;for _,connection in ipairs(rowConnections) do connection:Disconnect() end;frame:Destroy()
     end
     ctx.Connect(viewport:GetPropertyChangedSignal("Visible"),deferRefresh)
     explorer:SetRoot(workspace)
@@ -1837,6 +1901,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "1.7.1", Date = "2026-10-04", Title = "Explorer model preview", Changes = "Click models or parts to preview isolated geometry with a slow spin and pause control." },
     { Version = "1.7.0", Date = "2026-10-04", Title = "Built-in Explorer",
       Changes = "Added hierarchy browsing, scoped search, read-only properties and attributes.\nAdded single/multiple selection and direct .rbxm export using the shared export selection.\nResponsive tree/property panels and bounded lazy browsing." },
     { Version = "1.6.2", Date = "2026-10-04", Title = "Registered game module",
