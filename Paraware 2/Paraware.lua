@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.0.1",
+    Version = "2.0.2",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -604,9 +604,10 @@ function Chat.New(ctx)
             assert(profile.Endpoint:match('^https://[%w%.%-]+[:%d]*/[%w%._/%-]+$') and profile.Endpoint:sub(-17)=='/chat/completions','Use an HTTPS endpoint ending /chat/completions.')
             url=profile.Endpoint;headers.Authorization='Bearer '..profile.Key
             table.insert(history,1,{role='system',content=instructions})
-            body={model=profile.Model,messages=history,max_tokens=8192,stream=false}
+            body={model=profile.Model,messages=history,max_tokens=4096,stream=false}
+            if url=='https://openrouter.ai/api/v1/chat/completions' then body.reasoning={enabled=false} end
         end
-        return {Url=url,Method='POST',Headers=headers,Body=http:JSONEncode(body),Timeout=90}
+        return {Url=url,Method='POST',Headers=headers,Body=http:JSONEncode(body),Timeout=120}
     end
     function self:ReadReply(data,provider)
         local out={}
@@ -637,12 +638,27 @@ function Chat.New(ctx)
         self.Generation=self.Generation+1;local generation=self.Generation;local provider=self.Provider;local sentKey=self.Profiles[provider].Key
         local function redact(value) return tostring(value):gsub(sentKey:gsub('(%W)','%%%1'),'[redacted]') end
         self.Pending=user;self.Busy=true;self.Status='Waiting for '..provider..'…';self:Save();self:Changed()
-        task.delay(95,function()
-            if self.Alive and self.Generation==generation and self.Busy then user.Failed=true;self.Generation=self.Generation+1;self.Busy=false;self.Status='Request timed out. Check your connection or model, then Retry.';self:Save();self:Changed() end
+        task.delay(250,function()
+            if self.Alive and self.Generation==generation and self.Busy then self.Pending=nil;user.Failed=true;self.Generation=self.Generation+1;self.Busy=false;self.Status='Request timed out. Check your connection or model, then Retry.';self:Save();self:Changed() end
         end)
         task.spawn(function()
             local ok,result=pcall(function()
-                local response=transport(config);assert(type(response)=='table','No HTTP response')
+                local response
+                for attempt=1,2 do
+                    if not self.Alive or self.Generation~=generation then error('Request cancelled') end
+                    local delivered,value=pcall(transport,config)
+                    local code=delivered and type(value)=='table' and tonumber(value.StatusCode or value.Status) or 0
+                    local reason=not delivered and tostring(value):lower() or ''
+                    local transient=(not delivered and (reason:find('timeout',1,true) or reason:find('timed out',1,true) or reason:find('connection',1,true) or reason:find('network',1,true))) or code==408 or code==502 or code==503 or code==504
+                    if transient and attempt==1 then
+                        self.Status='Connection interrupted · retrying once…';self:Changed()
+                        task.wait(2)
+                    else
+                        assert(delivered,value)
+                        response=value;break
+                    end
+                end
+                assert(type(response)=='table','No HTTP response')
                 local code=tonumber(response.StatusCode or response.Status) or 0
                 assert(type(response.Body)=='string' and #response.Body<=2*1024*1024,'Invalid HTTP response body')
                 if code<200 or code>=300 then
@@ -656,7 +672,14 @@ function Chat.New(ctx)
             if not self.Alive or self.Generation~=generation then return end
             self.Busy=false;self.Pending=nil
             if ok then chat.Messages[#chat.Messages+1]={Role='assistant',Text=result};self.Status='Reply received · '..provider
-            else user.Failed=true;self.Status='Could not get a reply: '..redact(result):sub(1,400) end
+            else
+                user.Failed=true
+                local detail=redact(result)
+                local lower=detail:lower()
+                if lower:find('timeout',1,true) or lower:find('timed out',1,true) then
+                    self.Status='Provider connection timed out after retrying. Check connection or choose another chat model in Setup, then Retry.'
+                else self.Status='Could not get a reply: '..detail:sub(1,400) end
+            end
             self:Save();self:Changed()
         end)
         return true
@@ -2682,6 +2705,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "2.0.2", Date = "2026-10-04", Title = "AI connection recovery", Changes = "Added one bounded retry for temporary connection errors, longer timeouts, and faster OpenRouter replies with optional reasoning disabled." },
     { Version = "2.0.1", Date = "2026-10-04", Title = "Conversational AI replies", Changes = "Pinned a free chat model instead of random routing, excluded classifier reports from follow-up history, and added clear wrong-model errors." },
     { Version = "2.0.0", Date = "2026-10-04", Title = "API AI Chat", Changes = "Restored AI Chat with OpenAI, Gemini, Claude and compatible endpoints. Replies, saved local chats, code copy and stopped Script Maker drafts are built in." },
     { Version = "1.9.1", Date = "2026-10-04", Title = "Explorer world picking", Changes = "Added Pick in game on/off. World clicks select, highlight, inspect and reveal targets in Explorer, with shared picker controls." },
