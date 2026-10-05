@@ -751,8 +751,8 @@ function Chat.New(ctx)
             if not self.Alive or self.Generation~=generation then error('Request cancelled') end
             local result=self:HelperCall('/jobs/'..body.id)
             if result.done then
-                assert(result.error==nil or result.error=='',result.error)
                 self.HelperJob=nil
+                assert(result.error==nil or result.error=='',result.error)
                 return {StatusCode=200,Body=http:JSONEncode({output={{content={{type='output_text',text=result.text}}}}})}
             end
             self.Status='ChatGPT is replying… '..tostring(result.characters or 0)..' characters';self:Changed();task.wait(0.8)
@@ -867,7 +867,7 @@ function Chat.New(ctx)
             local ok,result=pcall(function()
                 for round=0,3 do
                 local response
-                for attempt=1,2 do
+                for attempt=1,3 do
                     if not self.Alive or self.Generation~=generation then error('Request cancelled') end
                     local delivered,value
                     if provider=='ChatGPT Plus' then delivered,value=pcall(self.PlanReply,self,config,generation)
@@ -875,7 +875,14 @@ function Chat.New(ctx)
                     local code=delivered and type(value)=='table' and tonumber(value.StatusCode or value.Status) or 0
                     local reason=not delivered and tostring(value):lower() or ''
                     local transient=(not delivered and (reason:find('timeout',1,true) or reason:find('timed out',1,true) or reason:find('connection',1,true) or reason:find('network',1,true))) or code==408 or code==502 or code==503 or code==504
-                    if transient and attempt==1 and provider~='ChatGPT Plus' then
+                    if provider=='ChatGPT Plus' and not delivered and reason:find('server_overloaded',1,true) and attempt<3 then
+                        self.Status='ChatGPT is busy · retrying '..attempt..'/2 shortly…';self:Changed()
+                        task.wait(attempt*3)
+                        if not self.Alive or self.Generation~=generation then error('Request cancelled') end
+                        local body=http:JSONDecode(config.Body)
+                        self.RequestSerial=self.RequestSerial+1;body.id=self.HelperId..'_'..tostring(self.RequestSerial)
+                        config.Body=http:JSONEncode(body)
+                    elseif transient and attempt==1 and provider~='ChatGPT Plus' then
                         self.Status='Connection interrupted · retrying once…';self:Changed()
                         task.wait(2)
                     else
@@ -914,7 +921,9 @@ function Chat.New(ctx)
                 user.Failed=true
                 local detail=redact(result)
                 local lower=detail:lower()
-                if lower:find('timeout',1,true) or lower:find('timed out',1,true) then
+                if lower:find('server_overloaded',1,true) then
+                    self.Status='ChatGPT is still busy after two retries. Your message is saved; press Retry shortly.'
+                elseif lower:find('timeout',1,true) or lower:find('timed out',1,true) then
                     self.Status='Provider connection timed out after retrying. Check connection or choose another chat model in Setup, then Retry.'
                 else self.Status='Could not get a reply: '..detail:sub(1,400) end
             end
