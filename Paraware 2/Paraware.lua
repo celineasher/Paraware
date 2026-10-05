@@ -3231,6 +3231,12 @@ return function(context)
             local ok, err = pcall(callback)
             if not ok then output(record, 'cleanup error', err) end
         end
+        local instances = record.CreatedInstances
+        record.CreatedInstances = {}
+        for instance in pairs(instances) do
+            local ok, err = pcall(function() instance:Destroy() end)
+            if not ok then output(record, 'cleanup error', err) end
+        end
         changed()
     end
     function manager:StopAll()
@@ -3249,7 +3255,7 @@ return function(context)
         instance.Parent = parent or context.Player:FindFirstChild('PlayerScripts') or context.Player:FindFirstChild('PlayerGui')
         local record = { Id = self.NextId, Name = instance.Name, Role = role or 'Local', Owner = owner,
             Instance = instance, Code = source or 'print("Hello from Paraware")\n', Status = 'Ready',
-            Mode = 'Managed', Generation = 0, Threads = {}, Connections = {}, Cleanups = {}, Logs = {} }
+            Mode = 'Managed', Generation = 0, Threads = {}, Connections = {}, Cleanups = {}, CreatedInstances = {}, Logs = {} }
         self.Records[record.Id] = record
         self.Selected = record.Id
         changed()
@@ -3373,7 +3379,21 @@ return function(context)
             local connection = signal:Connect(function(...) protect(callback, ...) end)
             record.Connections[connection] = true; return connection
         end
-        local environment = setmetatable({ script = record.Instance, scriptHub = api,
+        function api:TrackInstance(instance)
+            assert(active(), 'Script stopped')
+            assert(typeof(instance) == 'Instance', 'Expected an Instance')
+            assert(instance ~= record.Instance, 'Cannot track the Script Maker document')
+            record.CreatedInstances[instance] = true
+            return instance
+        end
+        local instanceAPI = setmetatable({new = function(className, parent)
+            assert(active(), 'Script stopped')
+            local instance = Instance.new(className)
+            record.CreatedInstances[instance] = true
+            if parent then instance.Parent = parent end
+            return instance
+        end}, {__index = Instance})
+        local environment = setmetatable({ script = record.Instance, scriptHub = api, Instance = instanceAPI,
             print = function(...) output(record, 'output', ...) end,
             warn = function(...) output(record, 'warning', ...) end,
             task = setmetatable({
@@ -3439,7 +3459,7 @@ return function(context)
         return assert(context.Player:FindFirstChild(location), location .. ' is unavailable')
     end
     local function label(record) return record.Id .. ' | ' .. record.Name end
-    tab:Paragraph({Title = 'Script Maker', Desc = 'Managed client scripts. Re-enable restarts from the beginning. Use scriptHub:Connect and task for cleanup. Choose Managed for cleanup/controllers or Executor compatibility for third-party loaders. Native crashes cannot be caught by this editor.'})
+    tab:Paragraph({Title = 'Script Maker', Desc = 'Managed client scripts. Re-enable restarts from the beginning. Created UI and instances are removed on Disable. Use scriptHub:Connect and task for cleanup, and scriptHub:TrackInstance for clones. Choose Managed for cleanup/controllers or Executor compatibility for third-party loaders. Native crashes cannot be caught by this editor.'})
     picker = tab:Dropdown({Title = 'Open script', Values = {}, Callback = function(value)
         if selecting then return end
         local id = tonumber(tostring(value):match('^(%d+)'))
