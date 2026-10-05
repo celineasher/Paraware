@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.4.0",
+    Version = "2.5.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -512,6 +512,172 @@ local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
+local createAimAssist
+createAimAssist = (function()
+local Aim={}
+function Aim.New(ctx)
+    local self={Alive=true,Enabled=false,Silent=false,Held=false,Focused=true,Mode='Enemy',Part='Head',Radius=150,Range=1000,Smoothing=12,Prediction=0,WallCheck=true,ShowCircle=true,SilentHold=true,Connections={},Status='Hold right mouse to aim. Both modes start off.'}
+    local function bind(signal,fn) local connection=signal:Connect(function(...) if self.Alive then fn(...) end end);self.Connections[#self.Connections+1]=connection end
+    function self:Blocked()
+        local mouse=ctx.Input:GetMouseLocation()
+        return not self.Focused or ctx.Input:GetFocusedTextBox()~=nil or ctx.IsBlocked and ctx.IsBlocked(mouse.X,mouse.Y)
+    end
+    function self:Eligible(player)
+        if player==ctx.Player then return false end
+        local same=ctx.Player.Team~=nil and player.Team==ctx.Player.Team and not ctx.Player.Neutral and not player.Neutral
+        if self.Mode=='Enemy' then return not same elseif self.Mode=='Team' then return same elseif self.Mode=='Specific players' then return ctx.ESP and ctx.ESP.Selected[player.UserId]==true end
+        return self.Mode=='All'
+    end
+    function self:Point(part)
+        if self.Prediction>0 and part.AssemblyLinearVelocity then return part.Position+part.AssemblyLinearVelocity*self.Prediction end
+        return part.Position
+    end
+    function self:Visible(character,position,params)
+        if not self.WallCheck then return true end
+        if ctx.Visible then return ctx.Visible(character,position) end
+        local camera=workspace.CurrentCamera;if not camera then return false end
+        local query=RaycastParams.new();query.FilterType=Enum.RaycastFilterType.Exclude
+        query.FilterDescendantsInstances={ctx.Player.Character, camera};query.IgnoreWater=true
+        local result=workspace:Raycast(camera.CFrame.Position,position-camera.CFrame.Position,params or query)
+        return not result or result.Instance:IsDescendantOf(character)
+    end
+    function self:SelectTarget()
+        local camera=workspace.CurrentCamera;if not camera then return end
+        local center=Vector2.new(camera.ViewportSize.X/2,camera.ViewportSize.Y/2)
+        local best,bestDistance
+        for _,player in ipairs(ctx.Players:GetPlayers()) do
+            if self:Eligible(player) then
+                local character=player.Character
+                local humanoid=character and character:FindFirstChildOfClass('Humanoid')
+                local part=character and (character:FindFirstChild(self.Part) or character:FindFirstChild('HumanoidRootPart'))
+                if character and character.Parent and humanoid and humanoid.Health>0 and part then
+                    local position=self:Point(part);local screen,visible=camera:WorldToViewportPoint(position)
+                    local pixels=((screen.X-center.X)^2+(screen.Y-center.Y)^2)^0.5
+                    local distance=(position-camera.CFrame.Position).Magnitude
+                    if visible and screen.Z>0 and pixels<=self.Radius and (self.Range==0 or distance<=self.Range) and (not bestDistance or pixels<bestDistance) and self:Visible(character,position) then
+                        best={Player=player,Character=character,Part=part};bestDistance=pixels
+                    end
+                end
+            end
+        end
+        return best
+    end
+    function self:Redirect(origin,direction,params)
+        if not self.Alive or not self.Silent or (self.SilentHold and not self.Held) or self:Blocked() then return end
+        if typeof(origin)~='Vector3' or typeof(direction)~='Vector3' or direction.Magnitude<1 then return end
+        local target=self.Target;local camera=workspace.CurrentCamera
+        if not target or not camera or not self:Eligible(target.Player) or target.Player.Character~=target.Character or not target.Part.Parent then return end
+        local humanoid=target.Character:FindFirstChildOfClass('Humanoid');if not humanoid or humanoid.Health<=0 then return end
+        local root=ctx.Player.Character and ctx.Player.Character:FindFirstChild('HumanoidRootPart')
+        if (origin-camera.CFrame.Position).Magnitude>12 and (not root or (origin-root.Position).Magnitude>12) then return end
+        local position=self:Point(target.Part)
+        local screen,onScreen=camera:WorldToViewportPoint(position)
+        local pixels=((screen.X-camera.ViewportSize.X/2)^2+(screen.Y-camera.ViewportSize.Y/2)^2)^0.5
+        if not onScreen or screen.Z<=0 or pixels>self.Radius or (self.Range>0 and (position-camera.CFrame.Position).Magnitude>self.Range) then return end
+        local offset=position-origin
+        if offset.Magnitude<0.001 or offset.Magnitude>direction.Magnitude or offset.Magnitude>10000 then return end
+        if offset.Unit:Dot(direction.Unit)<math.cos(math.rad(30)) then return end
+        if self.WallCheck then
+            local result=workspace:Raycast(origin,offset,params)
+            if result and not result.Instance:IsDescendantOf(target.Character) then return end
+        end
+        return offset.Unit*direction.Magnitude
+    end
+    function self:InstallSilent()
+        if ctx.InstallSilent then ctx.InstallSilent(self);return end
+        assert(type(hookmetamethod)=='function' and type(getnamecallmethod)=='function' and type(checkcaller)=='function','Silent aim needs hookmetamethod, getnamecallmethod and checkcaller in this runtime.')
+        local environment=getgenv and getgenv() or _G
+        local bridge=environment.ParawareAimRayBridge
+        if bridge then assert(bridge.Signature=='ParawareAimRayBridge1' and bridge.Installed,'An incompatible aim hook already exists')
+        else
+            bridge={Signature='ParawareAimRayBridge1'};local previous
+            local function dispatch(object,...)
+                local state=bridge.State
+                if state and object==workspace and getnamecallmethod()=='Raycast' and not checkcaller() then
+                    local args=table.pack(...)
+                    local ok,direction=pcall(state.Redirect,state,args[1],args[2],args[3])
+                    if ok and direction then args[2]=direction;return previous(object,table.unpack(args,1,args.n)) end
+                end
+                return previous(object,...)
+            end
+            previous=hookmetamethod(game,'__namecall',newcclosure and newcclosure(dispatch) or dispatch)
+            assert(type(previous)=='function','The runtime could not install a raycast hook')
+            bridge.Installed=true;environment.ParawareAimRayBridge=bridge
+        end
+        bridge.State=self;self.Bridge=bridge
+    end
+    function self:SetSilent(value)
+        if value then self:InstallSilent() end
+        self.Silent=value;self.Target=nil
+        self.Status=value and 'Silent raycast aim on. Only eligible local-origin Workspace rays are redirected.' or 'Silent aim off.'
+    end
+    function self:Stop()
+        self.Enabled=false;self.Silent=false;self.Held=false;self.Target=nil
+        if self.Bridge and self.Bridge.State==self then self.Bridge.State=nil end
+        if self.OnStopped then self.OnStopped() end
+    end
+    function self:Step(dt)
+        if not self.Alive then return end
+        if (not self.Enabled and not self.Silent) or self:Blocked() then self.Target=nil;return end
+        self.Target=self:SelectTarget()
+        if self.Enabled and self.Held and self.Target then
+            local camera=workspace.CurrentCamera;local position=self:Point(self.Target.Part)
+            if ctx.AimCamera then ctx.AimCamera(position,dt,self.Smoothing)
+            else camera.CFrame=camera.CFrame:Lerp(CFrame.lookAt(camera.CFrame.Position,position),1-math.exp(-self.Smoothing*math.clamp(dt or 0,0,0.1))) end
+        end
+    end
+    bind(ctx.Input.InputBegan,function(event) if event.UserInputType==Enum.UserInputType.MouseButton2 and not self:Blocked() then self.Held=true end end)
+    bind(ctx.Input.InputEnded,function(event) if event.UserInputType==Enum.UserInputType.MouseButton2 then self.Held=false end end)
+    bind(ctx.Input.WindowFocusReleased,function() self.Focused=false;self.Held=false;self.Target=nil end)
+    bind(ctx.Input.WindowFocused,function() self.Focused=true end)
+    bind(ctx.Player.CharacterAdded,function() self.Held=false;self.Target=nil end)
+    if ctx.RunService.BindToRenderStep then
+        self.RenderKey='ParawareAim_'..tostring(ctx.Player.UserId)
+        ctx.RunService:BindToRenderStep(self.RenderKey,Enum.RenderPriority.Camera.Value+1,function(dt) self:Step(dt);if self.Draw then self:Draw() end end)
+    else bind(ctx.RunService.RenderStepped,function(dt) self:Step(dt);if self.Draw then self:Draw() end end) end
+    function self:Unload()
+        self:Stop();self.Alive=false
+        if self.RenderKey then ctx.RunService:UnbindFromRenderStep(self.RenderKey) end
+        for _,connection in ipairs(self.Connections) do connection:Disconnect() end;self.Connections={}
+        if self.Overlay then self.Overlay:Destroy() end
+    end
+    return self
+end
+function Aim.Build(ctx)
+    local self=Aim.New(ctx);local tab=ctx.Tab;local guard=false
+    local overlay=Instance.new('ScreenGui');overlay.Name='ParawareAimCircle';overlay.IgnoreGuiInset=true;overlay.ResetOnSpawn=false;overlay.DisplayOrder=90
+    local parent=ctx.Player:FindFirstChild('PlayerGui');pcall(function() if gethui then parent=gethui() end end);overlay.Parent=parent;self.Overlay=overlay
+    local circle=Instance.new('Frame');circle.AnchorPoint=Vector2.new(0.5,0.5);circle.BackgroundTransparency=1;circle.Visible=false;circle.Parent=overlay
+    local corner=Instance.new('UICorner');corner.CornerRadius=UDim.new(1,0);corner.Parent=circle
+    local stroke=Instance.new('UIStroke');stroke.Thickness=1.5;stroke.Color=Color3.fromRGB(255,85,85);stroke.Transparency=0.2;stroke.Parent=circle
+    function self:Draw() local camera=workspace.CurrentCamera;circle.Visible=camera~=nil and self.Focused and self.ShowCircle and (self.Enabled or self.Silent);if camera then circle.Position=UDim2.fromOffset(camera.ViewportSize.X/2,camera.ViewportSize.Y/2);circle.Size=UDim2.fromOffset(self.Radius*2,self.Radius*2) end end
+    tab:Paragraph({Title='Camera and raycast aim',Desc='Hold right mouse to aim at the closest eligible target inside the circle. Specific players uses the selected list in Player ESP. Silent aim supports client Workspace raycasts only; custom or server-controlled shooting needs a game adapter. Both modes are off initially.'})
+    local status=tab:Paragraph({Title='Aim status',Desc=self.Status})
+    local aimToggle=tab:Toggle({Title='Enable aimbot',Value=false,Callback=function(value) if not guard then self.Enabled=value;self.Target=nil;self:Draw() end end})
+    local silentToggle
+    silentToggle=tab:Toggle({Title='Enable silent aim (raycasts)',Value=false,Callback=function(value)
+        if guard then return end
+        local ok,err=pcall(self.SetSilent,self,value)
+        if not ok then self.Silent=false;guard=true;if silentToggle.Set then silentToggle:Set(false) end;guard=false;self.Status=tostring(err):sub(1,240);ctx.Notify(self.Status) end
+        status:SetDesc(self.Status);self:Draw()
+    end})
+    self.OnStopped=function() guard=true;if aimToggle.Set then aimToggle:Set(false) end;if silentToggle.Set then silentToggle:Set(false) end;guard=false;circle.Visible=false;status:SetDesc('Aim stopped.') end
+    tab:Dropdown({Title='Aim targets',Values={'Enemy','Team','All','Specific players'},Value='Enemy',Callback=function(value) self.Mode=value;self.Target=nil end})
+    tab:Dropdown({Title='Aim body part',Values={'Head','HumanoidRootPart'},Value='Head',Callback=function(value) self.Part=value;self.Target=nil end})
+    tab:Slider({Title='Aim radius (pixels)',Step=1,Value={Min=20,Max=600,Default=150},Callback=function(value) self.Radius=value;self.Target=nil;self:Draw() end})
+    tab:Slider({Title='Aim smoothing',Desc='Higher values track faster.',Step=1,Value={Min=1,Max=50,Default=12},Callback=function(value) self.Smoothing=value end})
+    tab:Slider({Title='Maximum aim distance',Desc='0 = unlimited.',Step=1,Value={Min=0,Max=5000,Default=1000},Callback=function(value) self.Range=value;self.Target=nil end})
+    tab:Slider({Title='Movement prediction (milliseconds)',Step=1,Value={Min=0,Max=200,Default=0},Callback=function(value) self.Prediction=value/1000;self.Target=nil end})
+    tab:Toggle({Title='Aim wall check',Value=true,Callback=function(value) self.WallCheck=value;self.Target=nil end})
+    tab:Toggle({Title='Show aim circle',Value=true,Callback=function(value) self.ShowCircle=value;self:Draw() end})
+    tab:Toggle({Title='Silent aim requires right mouse',Value=true,Callback=function(value) self.SilentHold=value end})
+    tab:Colorpicker({Title='Aim circle color',Value=stroke.Color,Callback=function(value) stroke.Color=value end})
+    tab:Button({Title='Stop all aim',Callback=function() self:Stop() end})
+    return self
+end
+return Aim
+
+end)()
 local createPlayerESP
 createPlayerESP = (function()
 local ESP={}
@@ -1921,6 +2087,8 @@ local function overHub(position)
 end
 
 local function ownUI(object)
+    local aimOverlay=Session.Aim and Session.Aim.Overlay
+    if aimOverlay and (object==aimOverlay or (object.IsDescendantOf and object:IsDescendantOf(aimOverlay))) then return true end
     if Session.PlayerESP and Session.PlayerESP:IsOwned(object) then return true end
     local overlay = Session.Autoclicker and Session.Autoclicker.Overlay
     if overlay and (object == overlay or (object.IsDescendantOf and object:IsDescendantOf(overlay))) then return true end
@@ -2536,6 +2704,10 @@ local function build()
     local espTab=Window:Tab({Title="Player ESP",Icon="users"})
     Session.PlayerESP=createPlayerESP.Build({Tab=espTab,Players=Players,LocalPlayer=Player,RunService=RunService,Notify=notify})
     table.insert(cleanups,function() Session.PlayerESP:Unload() end)
+    local aimTab=Window:Tab({Title="Aim",Icon="crosshair"})
+    Session.Aim=createAimAssist.Build({Tab=aimTab,Player=Player,Players=Players,Input=Input,RunService=RunService,ESP=Session.PlayerESP,Notify=notify,
+        IsBlocked=function(x,y) local main=Window.UIElements and Window.UIElements.Main;return main and main.Visible~=false and not Window.Closed and overHub(Vector2.new(x,y)) or false end})
+    table.insert(cleanups,function() Session.Aim:Unload() end)
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
     Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Input = Input, Connect = connect,
         Notify = notify, OwnUI = ownUI, DecodeImage = decodeBase64, GetSelection = function() return selected end,
@@ -2569,6 +2741,7 @@ local function build()
         cancelExport = exportBusy and true or false
         maker:StopAll()
         Session.PlayerESP:SetEnabled(false)
+        Session.Aim:Stop()
         Session.Autoclicker:Stop("Stopped by session recovery.")
         reset(); clearSelection()
         if destroySoundPreview then destroySoundPreview() end
@@ -3431,6 +3604,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "2.5.0", Date = "2026-10-05", Title = "Aim controls", Changes = "Added camera aiming, optional Workspace-raycast silent aim, target filters, radius circle, smoothing, range, prediction, wall checks and cleanup." },
     { Version = "2.4.0", Date = "2026-10-05", Title = "Player ESP", Changes = "Added team/enemy/all/specific-player highlights, a live player list, name/health/distance labels, visibility/color/range controls and cleanup." },
     { Version = "2.3.1", Date = "2026-10-05", Title = "Autoclicker fixes", Changes = "Fixed CPS timing drift, cursor drag offsets and touch ownership, viewport changes, restricted-input fallback and restarting during a pending click." },
     { Version = "2.3.0", Date = "2026-10-05", Title = "Multiple-point autoclicker", Changes = "Added movable cursor points, per-point CPS/buttons/limits, layout save/load, shared rate cap, F8/F9 controls and automatic focus/respawn cleanup." },
