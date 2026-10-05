@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.3.0",
+    Version = "2.4.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -512,6 +512,115 @@ local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
+local createPlayerESP
+createPlayerESP = (function()
+local ESP={}
+function ESP.New(ctx)
+    local self={Alive=true,Enabled=false,Mode='Enemy',Selected={},Entries={},Connections={},Fill=Color3.fromRGB(255,70,70),TeamFill=Color3.fromRGB(70,220,120),Outline=Color3.fromRGB(255,255,255),Opacity=0.35,ThroughWalls=true,Names=true,Health=true,Distance=true,Range=0}
+    local folder=Instance.new('Folder');folder.Name='ParawareESP';folder.Parent=workspace;self.Folder=folder
+    local function connect(signal,fn) local c=signal:Connect(function(...) if self.Alive then fn(...) end end);self.Connections[#self.Connections+1]=c end
+    function self:Players() return ctx.Players:GetPlayers() end
+    function self:SameTeam(target) return ctx.LocalPlayer.Team~=nil and target.Team==ctx.LocalPlayer.Team and not ctx.LocalPlayer.Neutral and not target.Neutral end
+    function self:Matches(target)
+        if target==ctx.LocalPlayer then return false end
+        if self.Mode=='Specific players' then return self.Selected[target.UserId]==true end
+        if self.Mode=='Team' then return self:SameTeam(target) end
+        if self.Mode=='Enemy' then return not self:SameTeam(target) end
+        return self.Mode=='All'
+    end
+    function self:Remove(target)
+        local entry=self.Entries[target]
+        if entry then entry.Highlight:Destroy();entry.Label:Destroy();self.Entries[target]=nil end
+    end
+    function self:Update()
+        local present={};local rendered=0
+        local localRoot=ctx.LocalPlayer.Character and ctx.LocalPlayer.Character:FindFirstChild('HumanoidRootPart')
+        for _,target in ipairs(self:Players()) do
+            present[target]=true
+            local character=target.Character
+            local root=character and character:FindFirstChild('HumanoidRootPart')
+            local head=character and (character:FindFirstChild('Head') or root)
+            local humanoid=character and character:FindFirstChildOfClass('Humanoid')
+            local distance
+            if localRoot and root then pcall(function() distance=(localRoot.Position-root.Position).Magnitude end) end
+            local visible=self.Enabled and self:Matches(target) and character and character.Parent and root and head and (not humanoid or humanoid.Health>0) and (self.Range==0 or distance and distance<=self.Range) and rendered<64
+            if visible then
+                rendered=rendered+1
+                local entry=self.Entries[target]
+                if entry and entry.Character~=character then self:Remove(target);entry=nil end
+                if not entry then
+                    local highlight=Instance.new('Highlight');highlight.Name='PlayerHighlight';highlight.Adornee=character;highlight.Parent=folder
+                    local label=Instance.new('BillboardGui');label.Name='PlayerLabel';label.Size=UDim2.fromOffset(220,56);label.StudsOffset=Vector3.new(0,2.7,0);label.Adornee=head;label.Parent=folder
+                    local text=Instance.new('TextLabel');text.Size=UDim2.new(1,0,1,0);text.BackgroundTransparency=1;text.TextColor3=Color3.fromRGB(255,255,255);text.TextStrokeTransparency=0.35;text.Font=Enum.Font.GothamMedium;text.TextSize=13;text.TextWrapped=true;text.Parent=label
+                    entry={Character=character,Highlight=highlight,Label=label,Text=text};self.Entries[target]=entry
+                end
+                entry.Highlight.FillColor=self:SameTeam(target) and self.TeamFill or self.Fill;entry.Highlight.OutlineColor=self.Outline;entry.Highlight.FillTransparency=1-self.Opacity;entry.Highlight.OutlineTransparency=0
+                entry.Highlight.DepthMode=self.ThroughWalls and Enum.HighlightDepthMode.AlwaysOnTop or Enum.HighlightDepthMode.Occluded
+                entry.Label.Adornee=head;entry.Label.AlwaysOnTop=self.ThroughWalls;entry.Label.MaxDistance=self.Range==0 and 100000 or self.Range
+                local text={}
+                if self.Names then text[#text+1]=target.DisplayName==target.Name and target.Name or target.DisplayName..' (@'..target.Name..')' end
+                if self.Health and humanoid then text[#text+1]='HP '..math.floor(humanoid.Health)..'/'..math.floor(humanoid.MaxHealth) end
+                if self.Distance and distance then text[#text+1]=math.floor(distance)..' studs' end
+                entry.Text.Text=table.concat(text,'\n');entry.Label.Enabled=#text>0
+            else self:Remove(target) end
+        end
+        local stale={};for target in pairs(self.Entries) do if not present[target] then stale[#stale+1]=target end end;for _,target in ipairs(stale) do self:Remove(target) end
+        self.Count=rendered
+    end
+    function self:SetEnabled(value) self.Enabled=value;self:Update();if self.OnEnabledChanged then self.OnEnabledChanged(value) end end
+    function self:SetMode(mode) assert(mode=='Team' or mode=='Enemy' or mode=='All' or mode=='Specific players','Unknown ESP mode');self.Mode=mode;self:Update() end
+    function self:IsOwned(object) return object==folder or object.IsDescendantOf and object:IsDescendantOf(folder) end
+    function self:Unload()
+        self.Enabled=false;self:Update();self.Alive=false
+        for _,c in ipairs(self.Connections) do c:Disconnect() end;self.Connections={};folder:Destroy()
+    end
+    connect(ctx.Players.PlayerAdded,function() if self.OnListChanged then self.OnListChanged() end;self:Update() end)
+    connect(ctx.Players.PlayerRemoving,function(target) self:Remove(target);self.Selected[target.UserId]=nil;if self.OnListChanged then self.OnListChanged(target) end end)
+    local elapsed=0
+    connect(ctx.RunService.RenderStepped,function(dt) elapsed=elapsed+(tonumber(dt) or 0);if elapsed>=0.2 then elapsed=0;if self.Enabled then self:Update() end end end)
+    return self
+end
+function ESP.Build(ctx)
+    local self=ESP.New(ctx);local tab=ctx.Tab;local choosing=false;local labels={}
+    tab:Paragraph({Title='Player ESP',Desc='Highlight teammates, enemies, everyone, or a selected player list. Neutral and unassigned players count as enemies. Labels show only characters currently visible to this client. Up to 64 loaded characters are drawn.'})
+    local changingEnabled=false
+    local enableControl=tab:Toggle({Title='Enable player ESP',Value=false,Callback=function(value) if not changingEnabled then self:SetEnabled(value) end end})
+    self.OnEnabledChanged=function(value) changingEnabled=true;if enableControl.Set then enableControl:Set(value) end;changingEnabled=false end
+    local modePicker=tab:Dropdown({Title='ESP targets',Values={'Team','Enemy','All','Specific players'},Value='Enemy',Callback=function(value) self:SetMode(value) end})
+    local selectedList=tab:Paragraph({Title='Selected players',Desc='None selected'})
+    local function summary()
+        local names={};for _,p in ipairs(self:Players()) do if self.Selected[p.UserId] then names[#names+1]=p.Name end end;table.sort(names);selectedList:SetDesc(#names>0 and table.concat(names,', ') or 'None selected')
+    end
+    local selectedPlayer
+    local picker=tab:Dropdown({Title='Player list',Values={'No other players'},Value='No other players',Callback=function(value) if not choosing then selectedPlayer=labels[value] end end})
+    function self:RefreshList(leaving)
+        choosing=true;labels={};local values={};local players=self:Players();table.sort(players,function(a,b) return a.Name:lower()<b.Name:lower() end)
+        for _,p in ipairs(players) do if p~=ctx.LocalPlayer and p~=leaving then local label=p.DisplayName..' (@'..p.Name..') · '..p.UserId;values[#values+1]=label;labels[label]=p end end
+        if #values==0 then values={'No other players'} end
+        if picker.Refresh then picker:Refresh(values) end
+        local current
+        for label,p in pairs(labels) do if p==selectedPlayer then current=label end end
+        if not current then current=values[1];selectedPlayer=labels[current] end
+        if picker.Select then picker:Select(current) end
+        choosing=false;summary()
+    end
+    tab:Button({Title='Add selected player to ESP',Callback=function() if not selectedPlayer then ctx.Notify('Choose a player first.');return end;self.Selected[selectedPlayer.UserId]=true;self:SetMode('Specific players');if modePicker.Select then modePicker:Select('Specific players') end;summary() end})
+    tab:Button({Title='Remove selected player from ESP',Callback=function() if selectedPlayer then self.Selected[selectedPlayer.UserId]=nil;self:Update();summary() end end})
+    tab:Button({Title='Select all current players',Callback=function() for _,p in ipairs(self:Players()) do if p~=ctx.LocalPlayer then self.Selected[p.UserId]=true end end;self:SetMode('Specific players');if modePicker.Select then modePicker:Select('Specific players') end;summary() end})
+    tab:Button({Title='Clear selected player list',Callback=function() self.Selected={};self:Update();summary() end})
+    tab:Button({Title='Refresh player list',Callback=function() self:RefreshList() end})
+    tab:Toggle({Title='Show through walls',Value=true,Callback=function(value) self.ThroughWalls=value;self:Update() end})
+    for _,setting in ipairs({{'Names','Show player names'},{'Health','Show health'},{'Distance','Show distance'}}) do local key=setting[1];tab:Toggle({Title=setting[2],Value=true,Callback=function(value) self[key]=value;self:Update() end}) end
+    tab:Colorpicker({Title='Enemy / other player color',Value=self.Fill,Callback=function(value) self.Fill=value;self:Update() end})
+    tab:Colorpicker({Title='Teammate color',Value=self.TeamFill,Callback=function(value) self.TeamFill=value;self:Update() end})
+    tab:Colorpicker({Title='ESP outline color',Value=self.Outline,Callback=function(value) self.Outline=value;self:Update() end})
+    tab:Slider({Title='ESP fill opacity',Step=1,Value={Min=0,Max=100,Default=35},Callback=function(value) self.Opacity=math.clamp(value/100,0,1);self:Update() end})
+    tab:Slider({Title='Maximum ESP distance',Desc='0 = unlimited. Distance uses your character position.',Step=1,Value={Min=0,Max=5000,Default=0},Callback=function(value) self.Range=value;self:Update() end})
+    self.OnListChanged=function(leaving) self:RefreshList(leaving) end;self:RefreshList();return self
+end
+return ESP
+
+end)()
 local createAutoclicker
 createAutoclicker = (function()
 local Clicker={}
@@ -527,7 +636,7 @@ function Clicker.New(ctx)
         return size
     end
     function self:Position(point) local size=self:Size();return math.min(size.X-1,math.floor(point.X*size.X)),math.min(size.Y-1,math.floor(point.Y*size.Y)) end
-    function self:Stop(reason) self.Running=false;self.Placing=false;self.Drag=nil;self.Status=reason or 'Stopped. Click points stay available for the next run.';changed() end
+    function self:Stop(reason) self.Running=false;self.Placing=false;self.Drag=nil;self.DragInput=nil;self.Status=reason or 'Stopped. Click points stay available for the next run.';changed() end
     function self:Add()
         assert(#self.Points<64,'Maximum 64 click points');if self.Running then self:Stop() end
         self.NextId=self.NextId+1
@@ -537,7 +646,9 @@ function Clicker.New(ctx)
     function self:Get(id) for _,point in ipairs(self.Points) do if point.Id==id then return point end end end
     function self:Move(id,x,y)
         assert(not self.Running,'Stop before moving points');local point=assert(self:Get(id),'Choose a point');local size=self:Size()
-        point.X=math.clamp(number(x,0,100000)/size.X,0,1);point.Y=math.clamp(number(y,0,100000)/size.Y,0,1);changed()
+        local newX=math.clamp(number(x,-100000,100000)/size.X,0,1)
+        local newY=math.clamp(number(y,-100000,100000)/size.Y,0,1)
+        point.X,point.Y=newX,newY;changed()
     end
     function self:Configure(id,values)
         assert(not self.Running,'Stop before editing points');local point=assert(self:Get(id),'Choose a point')
@@ -557,28 +668,35 @@ function Clicker.New(ctx)
     function self:Clear() self:Stop();self.Points={};self.Selected=nil;changed() end
     function self:Backend()
         if ctx.Click then return ctx.Click end
+        local native
+        if type(mousemoveto)=='function' and type(mouse1click)=='function' then
+            native=function(x,y,button)
+                local click=button=='Right' and mouse2click or mouse1click;assert(type(click)=='function','Right click is unavailable in this runtime')
+                local original=ctx.Input:GetMouseLocation()
+                local ok,err=pcall(function() mousemoveto(x,y);click() end)
+                pcall(mousemoveto,original.X,original.Y);assert(ok,err)
+            end
+        end
         local vim;pcall(function() vim=game:GetService('VirtualInputManager') end)
         if vim and vim.SendMouseButtonEvent then
+            local denied=false
             return function(x,y,button)
+                if denied and native then return native(x,y,button) end
                 local index=button=='Right' and 1 or 0
                 local ok,err=pcall(function() vim:SendMouseButtonEvent(x,y,index,true,game,0) end)
                 local released,releaseError=pcall(function() vim:SendMouseButtonEvent(x,y,index,false,game,0) end)
+                if not ok and native then denied=true;return native(x,y,button) end
                 assert(ok and released,tostring(err or releaseError or 'Mouse input was denied'))
             end
         end
-        if type(mousemoveto)=='function' and type(mouse1click)=='function' then
-            return function(x,y,button)
-                local click=button=='Right' and mouse2click or mouse1click;assert(type(click)=='function','Right click is unavailable in this runtime')
-                local original=ctx.Input:GetMouseLocation();mousemoveto(x,y)
-                local ok,err=pcall(click);pcall(mousemoveto,original.X,original.Y);assert(ok,err)
-            end
-        end
+        if native then return native end
         error('This runtime does not expose mouse input. Click points can be configured, but cannot run here.')
     end
     function self:Start()
         assert(self.Alive,'Autoclicker unloaded');if self.Running then return end
+        assert(not self.InFlight,'Previous click is still finishing. Try Start again shortly.')
         local enabled=false;for _,p in ipairs(self.Points) do if p.Enabled then enabled=true end end;assert(enabled,'Add or enable a click point first')
-        self.Click=self:Backend();self.Time=0;self.Tokens=0;self.Cursor=0;self.LastUpdate=0;self.Placing=false;self.Drag=nil
+        self.Click=self:Backend();self.Time=0;self.Tokens=0;self.Cursor=0;self.LastUpdate=0;self.Placing=false;self.Drag=nil;self.DragInput=nil
         for _,point in ipairs(self.Points) do point.Count=0;point.Next=self.StartDelay end
         self.Running=true;self.Status='Starting in '..self.StartDelay..'s. F9 stops immediately.';changed()
     end
@@ -592,7 +710,7 @@ function Clicker.New(ctx)
             local index=(start+scanned)%#self.Points+1;local point=self.Points[index];scanned=scanned+1
             if point.Enabled and (point.Limit==0 or point.Count<point.Limit) then
                 remaining=true
-                if self.Time>=point.Next and self.Tokens>=1 then
+                if self.Time+0.00000001>=point.Next and self.Tokens+0.00000001>=1 then
                     local x,y=self:Position(point)
                     if not ctx.IsBlocked or not ctx.IsBlocked(x,y) then
                         self.InFlight=true
@@ -602,7 +720,9 @@ function Clicker.New(ctx)
                         if not ok then self:Stop('Mouse input failed: '..tostring(err):sub(1,160));return end
                         point.Count=point.Count+1;self.Tokens=self.Tokens-1;self.Cursor=index%#self.Points
                     end
-                    point.Next=self.Time+1/point.CPS
+                    local interval=1/point.CPS
+                    point.Next=point.Next+interval
+                    if point.Next<=self.Time then point.Next=point.Next+(math.floor((self.Time-point.Next)/interval)+1)*interval end
                 end
             end
         end
@@ -655,7 +775,7 @@ function Clicker.Build(ctx)
     tab:Button({Title='Duplicate selected mouse',Callback=function() act(function() local old=selected();local p=self:Add();p.X=math.clamp(old.X+0.025,0,1);p.Y=old.Y;self:Configure(p.Id,{CPS=old.CPS,Button=old.Button,Limit=old.Limit,Enabled=old.Enabled}) end) end})
     tab:Button({Title='Remove selected mouse',Callback=function() act(function() self:Remove(selected().Id) end) end})
     tab:Button({Title='Clear all mouse clicks',Callback=function() self:Clear() end})
-    local showControl=tab:Toggle({Title='Show movable cursors',Value=true,Callback=function(value) if not updating then self.ShowMarkers=value;self.OnChanged() end end})
+    local showControl=tab:Toggle({Title='Show movable cursors',Value=true,Callback=function(value) if not updating then self.ShowMarkers=value;if not value then self.Drag=nil;self.DragInput=nil end;self.OnChanged() end end})
     local capControl=tab:Slider({Title='Total CPS cap',Desc='Shared across every point. Missed clicks are skipped, never replayed in a burst.',Step=1,Value={Min=1,Max=120,Default=120},Callback=function(value) if not updating then act(function() self.RateCap=number(value,1,120) end) end end})
     local delayControl=tab:Slider({Title='Start delay (seconds)',Step=1,Value={Min=0,Max=10,Default=2},Callback=function(value) if not updating then act(function() assert(not self.Running,'Stop before changing delay');self.StartDelay=number(value,0,10) end) end end})
     tab:Button({Title='Start / stop · F8',Callback=function() if self.Running then self:Stop() else act(function() self:Start() end) end end})
@@ -678,7 +798,14 @@ function Clicker.Build(ctx)
                 local label=Instance.new('TextLabel');label.Size=UDim2.fromOffset(110,22);label.Position=UDim2.fromOffset(-37,35);label.BackgroundColor3=Color3.fromRGB(20,20,26);label.TextColor3=Color3.fromRGB(240,240,246);label.TextSize=12;label.Font=Enum.Font.Gotham;label.Parent=marker
                 markers[point.Id]=marker;labels[point.Id]=label
                 local id=point.Id
-                markerConnections[point.Id]=bind(marker.InputBegan,function(event) if not self.Running and (event.UserInputType==Enum.UserInputType.MouseButton1 or event.UserInputType==Enum.UserInputType.Touch) then self.Selected=id;self.Drag=id;self:Refresh() end end)
+                markerConnections[point.Id]=bind(marker.InputBegan,function(event)
+                    if not self.Running and not self.InFlight and (event.UserInputType==Enum.UserInputType.MouseButton1 or event.UserInputType==Enum.UserInputType.Touch) then
+                        local pos=event.UserInputType==Enum.UserInputType.Touch and event.Position or ctx.Input:GetMouseLocation()
+                        local px,py=self:Position(point)
+                        self.Selected=id;self.Drag=id;self.DragInput=event.UserInputType==Enum.UserInputType.Touch and event or nil
+                        self.DragOffsetX=px-pos.X;self.DragOffsetY=py-pos.Y;self:Refresh()
+                    end
+                end)
             end
             local x,y=self:Position(point);marker.Position=UDim2.fromOffset(x,y);marker.ImageColor3=point.Enabled and Color3.fromRGB(255,90,90) or Color3.fromRGB(130,130,140)
             marker.Visible=self.ShowMarkers and not self.Running and not self.Placing
@@ -697,14 +824,16 @@ function Clicker.Build(ctx)
             if limit.Set then limit:Set(tostring(point.Limit)) end
             if buttonChoice.Select then buttonChoice:Select(point.Button) end
             if enabled.Set then enabled:Set(point.Enabled) end
-        end
+        elseif selector.Select then selector:Select('No points') end
         updating=false
     end
     self.OnChanged=function() self:Refresh() end
     bind(ctx.Input.InputChanged,function(event)
-        if self.Drag and not self.Running and (event.UserInputType==Enum.UserInputType.MouseMovement or event.UserInputType==Enum.UserInputType.Touch) then local pos=event.Position or ctx.Input:GetMouseLocation();act(function() self:Move(self.Drag,pos.X,pos.Y) end) end
+        if self.Drag and not self.Running and ((not self.DragInput and event.UserInputType==Enum.UserInputType.MouseMovement) or event==self.DragInput) then
+            local pos=event.Position or ctx.Input:GetMouseLocation();act(function() self:Move(self.Drag,pos.X+(self.DragOffsetX or 0),pos.Y+(self.DragOffsetY or 0)) end)
+        end
     end)
-    bind(ctx.Input.InputEnded,function(event) if event.UserInputType==Enum.UserInputType.MouseButton1 or event.UserInputType==Enum.UserInputType.Touch then self.Drag=nil end end)
+    bind(ctx.Input.InputEnded,function(event) if (not self.DragInput and event.UserInputType==Enum.UserInputType.MouseButton1) or event==self.DragInput then self.Drag=nil;self.DragInput=nil end end)
     bind(ctx.Input.InputBegan,function(event)
         if event.KeyCode==Enum.KeyCode.F9 then self:Stop();return end
         if event.KeyCode==Enum.KeyCode.Escape and self.Placing then self:Stop('Placement cancelled.');return end
@@ -715,7 +844,11 @@ function Clicker.Build(ctx)
     end)
     if ctx.Input.WindowFocusReleased then bind(ctx.Input.WindowFocusReleased,function() self:Stop('Stopped because the game lost focus.') end) end
     bind(ctx.Player.CharacterAdded,function() self:Stop('Stopped on respawn.') end)
-    bind(ctx.RunService.RenderStepped,function(dt) self:Step(dt) end)
+    bind(ctx.RunService.RenderStepped,function(dt)
+        local size=self:Size()
+        if size.X~=self.LastWidth or size.Y~=self.LastHeight then self.LastWidth,self.LastHeight=size.X,size.Y;self:Refresh() end
+        self:Step(dt)
+    end)
     self:Refresh();return self
 end
 return Clicker
@@ -1788,6 +1921,7 @@ local function overHub(position)
 end
 
 local function ownUI(object)
+    if Session.PlayerESP and Session.PlayerESP:IsOwned(object) then return true end
     local overlay = Session.Autoclicker and Session.Autoclicker.Overlay
     if overlay and (object == overlay or (object.IsDescendantOf and object:IsDescendantOf(overlay))) then return true end
     local main = Window and Window.UIElements and Window.UIElements.Main
@@ -2399,6 +2533,9 @@ local function build()
 
     local home = Window:Tab({ Title = "Controls", Icon = "sliders-horizontal" })
     local assets = Window:Tab({ Title = "Object export", Icon = "box" })
+    local espTab=Window:Tab({Title="Player ESP",Icon="users"})
+    Session.PlayerESP=createPlayerESP.Build({Tab=espTab,Players=Players,LocalPlayer=Player,RunService=RunService,Notify=notify})
+    table.insert(cleanups,function() Session.PlayerESP:Unload() end)
     local explorerTab = Window:Tab({ Title = "Explorer", Icon = "folder-tree" })
     Session.Explorer = createExplorer({ Tab = explorerTab, Player = Player, Input = Input, Connect = connect,
         Notify = notify, OwnUI = ownUI, DecodeImage = decodeBase64, GetSelection = function() return selected end,
@@ -2406,6 +2543,7 @@ local function build()
         GetPicker = function() return state.Picker end, SetPicker = setWorldPicker,
         Export = function() exportSelection() end,
         IsInternal = function(object)
+            if Session.PlayerESP and Session.PlayerESP:IsOwned(object) then return true end
             if object == pickerHighlight or (Session.Sounds and Session.Sounds:IsOwned(object)) then return true end
             for _, highlight in pairs(selectionHighlights) do if object == highlight then return true end end
             local preview = vfxPreview and vfxPreview.Model
@@ -2430,6 +2568,7 @@ local function build()
     Session.Recover = function()
         cancelExport = exportBusy and true or false
         maker:StopAll()
+        Session.PlayerESP:SetEnabled(false)
         Session.Autoclicker:Stop("Stopped by session recovery.")
         reset(); clearSelection()
         if destroySoundPreview then destroySoundPreview() end
@@ -3292,6 +3431,8 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "2.4.0", Date = "2026-10-05", Title = "Player ESP", Changes = "Added team/enemy/all/specific-player highlights, a live player list, name/health/distance labels, visibility/color/range controls and cleanup." },
+    { Version = "2.3.1", Date = "2026-10-05", Title = "Autoclicker fixes", Changes = "Fixed CPS timing drift, cursor drag offsets and touch ownership, viewport changes, restricted-input fallback and restarting during a pending click." },
     { Version = "2.3.0", Date = "2026-10-05", Title = "Multiple-point autoclicker", Changes = "Added movable cursor points, per-point CPS/buttons/limits, layout save/load, shared rate cap, F8/F9 controls and automatic focus/respawn cleanup." },
     { Version = "2.2.0", Date = "2026-10-05", Title = "AI chat improvements", Changes = "Readable prose and separate code blocks, saved drafts and preferences, chat export, live inspection toggle, overload recovery and stable transcript scrolling. GPT-5.6 Sol is the ChatGPT default. Managed scripts clean up their created UI on Disable." },
     { Version = "2.1.1", Date = "2026-10-05", Title = "Sol Medium preference", Changes = "Added GPT-6.1 Sol with explicit Medium reasoning, visible connection status in Setup and account model availability checks." },
