@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.5.0",
+    Version = "2.7.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -512,7 +512,107 @@ local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
+local createSessionTools
 local createAimAssist
+createSessionTools = (function()
+local Tools={}
+local fields={Speed={0,150},JumpPower={0,200},JumpHeight={0,50},FlySpeed={5,200},Fov={40,120}}
+function Tools.Validate(data,place)
+    assert(type(data)=='table' and data.Schema==1 and data.Place==tostring(place),'Profile belongs to another place or has an unsupported format.')
+    assert(type(data.Values)=='table','Profile values are missing.')
+    local values={}
+    for key,bounds in pairs(fields) do
+        local value=data.Values[key]
+        assert(type(value)=='number' and value==value and math.abs(value)<math.huge,'Invalid profile value: '..key)
+        values[key]=math.clamp(value,bounds[1],bounds[2])
+    end
+    return values
+end
+function Tools.Build(ctx)
+    local self={Alive=true,Elapsed=0,Frames=0,Selected=nil,Commands=ctx.Commands}
+    local file='Paraware-profile-'..tostring(game.PlaceId)..'.json'
+    local json=game:GetService('HttpService')
+    local tab=ctx.Tab
+    local search=tab:Section({Title='Command search',Opened=true,Box=true})
+    search:Paragraph({Title='Find an action',Desc='Press F6 to open Session. Search a tab or action, select a result, then press Run command. F10 stops managed activity.'})
+    local results
+    local function filter(query)
+        local names={};query=tostring(query or ''):lower():sub(1,80)
+        for _,command in ipairs(self.Commands) do if command.Name:lower():find(query,1,true) then names[#names+1]=command.Name end end
+        if #names==0 then names={'No matching commands'} end
+        self.Selected=names[1]=='No matching commands' and nil or names[1]
+        if results then results:Refresh(names);results:Select(names[1]) end
+        return names
+    end
+    search:Input({Title='Search commands',Placeholder='Explorer, stop, camera...',Value='',Callback=filter})
+    results=search:Dropdown({Title='Matching commands',Values=filter(''),Value=self.Selected,Callback=function(value) self.Selected=value~="No matching commands" and value or nil end})
+    search:Button({Title='Run command',Callback=function()
+        for _,command in ipairs(self.Commands) do if command.Name==self.Selected then local ok,err=pcall(command.Run);if not ok then ctx.Notify(tostring(err):sub(1,200)) end;return end end
+        ctx.Notify('Choose a matching command first.')
+    end})
+    local profile=tab:Section({Title='Game profile',Opened=false,Box=true})
+    local status=profile:Paragraph({Title='Profile status',Desc='Speed, jump, flight speed and field of view for place '..game.PlaceId..'. Loading restores values with movement and effects stopped.'})
+    function self:Read()
+        assert(type(readfile)=='function','File loading is unavailable.')
+        return Tools.Validate(json:JSONDecode(readfile(file)),game.PlaceId)
+    end
+    function self:Load()
+        local ok,values=pcall(self.Read,self)
+        if not ok then status:SetDesc('Could not load profile: '..tostring(values):sub(1,200));return false end
+        ctx.Stop()
+        for key,value in pairs(values) do ctx.Controls[key]:Set(value) end
+        status:SetDesc('Profile loaded for place '..game.PlaceId..'. Controls remain stopped.');return true
+    end
+    profile:Button({Title='Save game profile',Callback=function()
+        local ok,err=pcall(function()
+            assert(type(writefile)=='function','File saving is unavailable.')
+            if self.Damaged then error('Existing profile is damaged. Forget it before saving a replacement.') end
+            local values={};for key in pairs(fields) do values[key]=ctx.State[key] end
+            Tools.Validate({Schema=1,Place=tostring(game.PlaceId),Values=values},game.PlaceId)
+            writefile(file,json:JSONEncode({Schema=1,Place=tostring(game.PlaceId),Values=values}))
+        end)
+        status:SetDesc(ok and ('Saved game profile for place '..game.PlaceId..'. It loads automatically on the next run without enabling controls.') or tostring(err):sub(1,220))
+    end})
+    profile:Button({Title='Load game profile',Callback=function() self:Load() end})
+    profile:Button({Title='Forget game profile',Callback=function()
+        local ok,err=pcall(function() assert(type(delfile)=='function','File deletion is unavailable.');delfile(file) end)
+        if ok then self.Damaged=false end
+        status:SetDesc(ok and 'Saved profile removed. Current values are unchanged.' or tostring(err):sub(1,200))
+    end})
+    local perf=tab:Section({Title='Performance',Opened=false,Box=true})
+    local metrics=perf:Paragraph({Title='Client performance',Desc='Collecting frame timing...'})
+    self.Metrics=true
+    perf:Toggle({Title='Update performance panel',Value=true,Callback=function(value) self.Metrics=value;self.Elapsed=0;self.Frames=0;if not value then metrics:SetDesc('Performance updates paused.') end end})
+    perf:Button({Title='Copy session summary',Callback=function()
+        if type(setclipboard)~='function' then ctx.Notify('Clipboard is unavailable.');return end
+        local ok=pcall(setclipboard,'Paraware '..ctx.Version..'\nPlace: '..game.PlaceId..'\n'..(self.Summary or 'Frame timing unavailable'))
+        ctx.Notify(ok and 'Session summary copied.' or 'Could not copy summary.')
+    end})
+    tab:Button({Title='Emergency stop (F10)',Desc='Stop managed scripts, AI requests, clicking, aiming and ESP; restore controls and clear previews.',Callback=ctx.Stop})
+    local render=ctx.RunService.RenderStepped:Connect(function(dt)
+        if not self.Alive or not self.Metrics or type(dt)~='number' or dt<=0 then return end
+        self.Elapsed=self.Elapsed+dt;self.Frames=self.Frames+1
+        if self.Elapsed<1 then return end
+        local fps=math.floor(self.Frames/self.Elapsed+.5);local ms=self.Elapsed/self.Frames*1000
+        local ping,memory='unavailable','unavailable'
+        pcall(function() ping=string.format('%.0f ms',ctx.Player:GetNetworkPing()*1000) end)
+        pcall(function() memory=string.format('%.0f MB',game:GetService('Stats'):GetTotalMemoryUsageMb()) end)
+        self.Summary=string.format('%d FPS · %.1f ms/frame\nNetwork latency: %s · Client memory: %s',fps,ms,ping,memory)
+        metrics:SetDesc(self.Summary);self.Elapsed=0;self.Frames=0
+    end)
+    local keyboard=ctx.Input.InputBegan:Connect(function(event,processed)
+        if not self.Alive or processed or ctx.Input:GetFocusedTextBox() then return end
+        if event.KeyCode==Enum.KeyCode.F10 then ctx.Stop() elseif event.KeyCode==Enum.KeyCode.F6 then ctx.Open() end
+    end)
+    function self:Unload() self.Alive=false;render:Disconnect();keyboard:Disconnect() end
+    local exists=false
+    if type(isfile)=='function' then local ok,value=pcall(isfile,file);exists=ok and value end
+    if exists then local ok=pcall(self.Read,self);if ok then self:Load() else self.Damaged=true;status:SetDesc('Saved profile is damaged; it was preserved. Forget it to save a replacement.') end end
+    return self
+end
+return Tools
+
+end)()
 createAimAssist = (function()
 local Aim={}
 function Aim.New(ctx)
@@ -2207,31 +2307,66 @@ local function updateHistory()
     historyStatus:SetDesc(#lines > 0 and table.concat(lines, "\n\n") or "No files saved this session.")
 end
 
+local bulkVfxClasses={ParticleEmitter=true,Beam=true,Trail=true,Fire=true,Smoke=true,Sparkles=true}
+local lightingProperties={"Ambient","OutdoorAmbient","Brightness","ClockTime","TimeOfDay","ColorShift_Bottom","ColorShift_Top","EnvironmentDiffuseScale","EnvironmentSpecularScale","ExposureCompensation","FogColor","FogStart","FogEnd","GeographicLatitude","GlobalShadows","ShadowSoftness","Technology","LightingStyle","PrioritizeLightingQuality"}
+local function lightingSettings()
+    local folder=Instance.new("Folder");folder.Name="LightingSettings"
+    for _,property in ipairs(lightingProperties) do
+        local ok,value=pcall(function() return Lighting[property] end)
+        if ok and value~=nil then
+            local kind=typeof(value)
+            local class=kind=="Color3" and "Color3Value" or kind=="number" and "NumberValue" or kind=="boolean" and "BoolValue" or "StringValue"
+            local entry=Instance.new(class);entry.Name=property;entry.Value=(class=="StringValue" and tostring(value) or value);entry.Parent=folder
+        end
+    end
+    return folder
+end
+local function collectBulk(category)
+    local result={}
+    local objects
+    if category=="Lighting" or category=="Skies" then objects=Lighting:GetChildren() else objects=game:GetDescendants() end
+    for _,object in ipairs(objects) do
+        if object.Parent and not ownUI(object) and (not vfxPreview or not object:IsDescendantOf(vfxPreview.Model)) then
+            if category=="Lighting" or category=="Skies" and object:IsA("Sky") or (category=="All VFX" or category=="All VFX original") and bulkVfxClasses[object.ClassName] then result[#result+1]=object end
+        end
+    end
+    return result
+end
 local function exportSelection(category)
     if exportBusy then notify("An export is already running."); return end
     refreshSelection()
     local eligible, targets = {}, {}
-    if category == "Game UI" then eligible = collectGameUI()
+    local lightingOnly=category=="Lighting"
+    local bulk=lightingOnly or category=="Skies" or category=="All VFX" or category=="All VFX original"
+    if bulk then
+        local ok,result=pcall(collectBulk,category)
+        if not ok then exportMessage("Scan failed",tostring(result));return end
+        eligible=result
+    elseif category == "Game UI" then eligible = collectGameUI()
     elseif category == "Sound" then if soundChoice and soundChoice.Object.Parent then eligible = { soundChoice.Object } end
     elseif category == "VFX" or category == "VFX original" then if vfxChoice and vfxChoice.Parent then eligible = { vfxChoice } end
     else
         for _, target in ipairs(selected) do eligible[#eligible + 1] = target end
     end
+    local eligibleSet={}
+    for _,target in ipairs(eligible) do eligibleSet[target]=true end
     for _, target in ipairs(eligible) do
-        local covered = false
-        for _, ancestor in ipairs(eligible) do
-            if target ~= ancestor and target:IsDescendantOf(ancestor) then covered = true; break end
+        local covered=false;local ancestor=target.Parent
+        while ancestor do
+            if eligibleSet[ancestor] then covered=true;break end
+            ancestor=ancestor.Parent
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 then exportMessage("Nothing to export", (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
+    if #targets == 0 and not lightingOnly then exportMessage("Nothing to export", (category=="Skies") and "No loaded skies were found in Lighting." or (category=="All VFX" or category=="All VFX original") and "No loaded supported VFX were found." or (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
-    if category ~= "Game UI" and exportLayout == "Separate files" then
+    if not bulk and category ~= "Game UI" and exportLayout == "Separate files" then
         for _, target in ipairs(targets) do batches[#batches + 1] = { target } end
     else batches[1] = targets end
     local filename = customFilename
     if category == "Game UI" and filename == "" then filename = "GameUI-" .. game.PlaceId end
+    if bulk and filename=="" then filename=(lightingOnly and "Lighting" or category=="Skies" and "Skies" or "AllVFX").."-"..game.PlaceId end
     exportBusy, cancelExport = true, false
     exportMessage("Preparing export", #targets .. " root(s), " .. #batches .. " file(s). Loading the exporter...")
     task.spawn(function()
@@ -2249,6 +2384,7 @@ local function exportSelection(category)
             for index, batch in ipairs(batches) do
                 if cancelExport or not Session.Alive then break end
                 local wrote, path, bytes, exportRig = false, nil, 0, nil
+                local temporary={}
                 local ok, err = pcall(function()
                     local saveTargets, allUI, anyUI = {}, true, false
                     for _, target in ipairs(batch) do
@@ -2257,8 +2393,16 @@ local function exportSelection(category)
                         allUI, anyUI = allUI and ui, anyUI or ui
                         saveTargets[#saveTargets + 1] = target
                     end
+                    if lightingOnly then local settings=lightingSettings();temporary[#temporary+1]=settings;saveTargets[#saveTargets+1]=settings end
+                    if category=="All VFX" then
+                        saveTargets={}
+                        for _,target in ipairs(batch) do
+                            if cancelExport or not Session.Alive then return end
+                            local rig=buildVfxRig(target,false);temporary[#temporary+1]=rig.Model;saveTargets[#saveTargets+1]=rig.Model
+                        end
+                    end
                     if category == "VFX" then exportRig = buildVfxRig(batch[1], false); saveTargets = { exportRig.Model } end
-                    local group = (category == "VFX" or category == "VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
+                    local group = (lightingOnly or category=="Skies") and "Lighting" or (category == "VFX" or category == "VFX original" or category=="All VFX" or category=="All VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
                     if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
                     local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
@@ -2298,6 +2442,7 @@ local function exportSelection(category)
                     assert(wrote or cancelExport or not Session.Alive, "Exporter produced no file. It may be busy or unsupported.")
                 end)
                 if exportRig then exportRig.Model:Destroy() end
+                for _,object in ipairs(temporary) do object:Destroy() end
                 if wrote and ok then
                     successes, lastExportPath = successes + 1, path
                     exportHistory[#exportHistory + 1] = { Path = path, Bytes = bytes, Roots = #batch, Time = os.date("%H:%M:%S") }
@@ -2319,7 +2464,7 @@ local function exportSelection(category)
         elseif failures > 0 then
             exportMessage(successes > 0 and "Export partially saved" or "Export failed", successes .. " saved / " .. failures .. " failed\n" .. table.concat(errors, "\n") .. "\nSelection is kept for retry.")
         else
-            exportMessage("Model saved", successes .. " file(s) saved\n" .. lastExportPath .. "\nOpen .rbxm files in Roblox Studio. UI belongs in StarterGui or PlayerGui.")
+            exportMessage("Model saved", successes .. " file(s) saved\n" .. lastExportPath .. "\nOpen .rbxm files in Roblox Studio. UI belongs in StarterGui or PlayerGui. Lighting children belong in Lighting; LightingSettings stores values to apply to the service.")
             notify("Saved " .. successes .. " export file(s).")
         end
     end)
@@ -2740,6 +2885,7 @@ local function build()
     Session.Recover = function()
         cancelExport = exportBusy and true or false
         maker:StopAll()
+        Session.AIChat:Cancel()
         Session.PlayerESP:SetEnabled(false)
         Session.Aim:Stop()
         Session.Autoclicker:Stop("Stopped by session recovery.")
@@ -2783,8 +2929,10 @@ local function build()
     local function toggle(tab, key, title, desc, callback)
         toggles[key] = tab:Toggle({ Title = title, Desc = desc, Value = false, Callback = callback })
     end
+    local profileControls={}
+    local profileKeys={["Walk speed"]="Speed",["Jump power"]="JumpPower",["Jump height"]="JumpHeight",["Fly speed"]="FlySpeed",["Field of view"]="Fov"}
     local function slider(tab, title, desc, min, max, default, callback)
-        return tab:Slider({
+        local control=tab:Slider({
             Title = title, Desc = desc, Step = 1, IsTextbox = true,
             Value = { Min = min, Max = max, Default = default },
             Callback = function(value)
@@ -2792,6 +2940,8 @@ local function build()
                 if number and number == number then callback(math.clamp(number, min, max)) end
             end,
         })
+        if profileKeys[title] then profileControls[profileKeys[title]]={Set=function(_,value) control:Set(value);callback(value) end} end
+        return control
     end
 
     local movement = home:Section({ Title = "Movement", Icon = "user", Opened = true, Box = true })
@@ -2883,7 +3033,7 @@ local function build()
     local files = assets:Section({ Title = "Export settings", Icon = "file-cog", Opened = false, Box = true })
     files:Dropdown({ Title = "File layout", Values = { "Together", "Separate files" }, Value = exportLayout, Callback = function(value) exportLayout = value end })
     files:Input({ Title = "Filename", Placeholder = "Automatic", Value = "", Callback = function(value) customFilename = tostring(value):sub(1, 64) end })
-    files:Paragraph({ Title = "File destination", Desc = "Paraware-Exports/Models, UI, or Mixed inside your executor workspace. If folders are unavailable, filenames carry the category. Timestamps prevent overwrites." })
+    files:Paragraph({ Title = "File destination", Desc = "Paraware-Exports/Models, UI, Mixed, Lighting, Sounds, or VFX inside your executor workspace. If folders are unavailable, filenames carry the category. Timestamps prevent overwrites." })
     actions:Button({ Title = "Export selected", Icon = "download", Callback = function() exportSelection() end })
     actions:Button({ Title = "Cancel export", Callback = function()
         if not exportBusy then notify("No export is running."); return end
@@ -2909,6 +3059,10 @@ local function build()
     local gameUI = assets:Section({ Title = "Whole game UI", Icon = "panels-top-left", Opened = false, Box = true })
     gameUI:Paragraph({ Title = "One UI file", Desc = "Export every loaded game ScreenGui in PlayerGui, including hidden interfaces and their descendants, into one .rbxm. Excludes Paraware and known Cobalt/Dex++ screens. Scripts are excluded; unopened interfaces that have not been created yet cannot be saved." })
     gameUI:Button({ Title = "Export whole game UI", Icon = "download", Callback = function() exportSelection("Game UI") end })
+    local lightExport=assets:Section({Title="Lighting export",Icon="sun",Opened=false,Box=true})
+    lightExport:Paragraph({Title="Lighting and skies",Desc="Save every loaded Lighting child, including skies, atmosphere and post-processing, in one .rbxm. LightingSettings contains readable service values to apply in Studio. Exports current client values, including local changes; scripts are excluded."})
+    lightExport:Button({Title="Export all Lighting",Icon="download",Callback=function() exportSelection("Lighting") end})
+    lightExport:Button({Title="Export all skies",Desc="Save every direct Sky child of Lighting in one file.",Callback=function() exportSelection("Skies") end})
     local audio = assets:Section({ Title = "Sound export", Icon = "volume-2", Opened = false, Box = true })
     audio:Paragraph({ Title = "Find and preview audio", Desc = "Rescan finds loaded Sound and AudioPlayer objects. Select a sound, play it, and seek with the bar or an exact timestamp. Preview is local. Audio downloads depend on asset permissions; .rbxm exports store the audio object and its asset reference." })
     audio:Button({ Title = "Rescan sounds", Icon = "refresh-cw", Callback = scanSounds })
@@ -2972,6 +3126,8 @@ local function build()
     vfx:Slider({ Title = "One-shot duration", Desc = "Seconds before Stop and clear", Step = 0.5, Value = { Min = 0.5, Max = 20, Default = vfxDuration }, Callback = function(value) vfxDuration = math.clamp(tonumber(value) or 3, 0.5, 20) end })
     vfx:Slider({ Title = "Preview distance", Desc = "Studs in front of the camera", Step = 1, Value = { Min = 4, Max = 40, Default = vfxDistance }, Callback = function(value) vfxDistance = math.clamp(tonumber(value) or 12, 4, 40) end })
     vfx:Button({ Title = "Export VFX rig", Icon = "download", Desc = "Save a standalone .rbxm with a carrier and sample endpoints. Scripts and preview animation are excluded.", Callback = function() exportSelection("VFX") end })
+    vfx:Button({Title="Export all VFX rigs",Icon="download",Desc="Fresh scan of all loaded supported effects, including disabled ones. One file of standalone carrier rigs with sample beam/trail endpoints; preview animation is excluded.",Callback=function() exportSelection("All VFX") end})
+    vfx:Button({Title="Export all original VFX",Desc="Fresh scan into one file of original effect objects. External attachment references and parent geometry are not included.",Callback=function() exportSelection("All VFX original") end})
     vfx:Button({ Title = "Export original effect", Desc = "Preserve the selected effect's properties; its external attachments/parent geometry are not included.", Callback = function() exportSelection("VFX original") end })
     vfx:Button({ Title = "Copy effect path", Icon = "copy", Callback = function()
         if not vfxChoice or not vfxChoice.Parent then notify("Choose a loaded effect first."); return end
@@ -3008,13 +3164,22 @@ local function build()
     settings:Button({ Title = "Recover workspace", Desc = "Stop managed scripts, restore controls, and clear selection/previews. External hooks and UI require their own unload.", Callback = Session.Recover })
     settings:Button({ Title = "Restore all controls", Callback = function() reset(); notify("All controls restored.") end })
     settings:Button({ Title = "Unload Paraware", Desc = "Restore values, stop flight, and disconnect the hub.", Callback = Session.Unload })
-    createHubExtras.Build({ Window = Window, WindUI = WindUI, Config = Config,
+    local extrasTabs=createHubExtras.Build({ Window = Window, WindUI = WindUI, Config = Config,
         Preferences = preferences, Session = Session, Player = Player, Notify = notify, Log = log,
         Connect = connect, OnCleanup = function(fn) table.insert(cleanups, fn) end,
         LocalModule = detected, OnGame = function(name)
             gameInfo:SetDesc("Place: " .. game.PlaceId .. "\nUniverse: " .. game.GameId .. "\nModule: " .. name)
         end,
     })
+    local commands={}
+    for _,entry in ipairs({{"Controls",home},{"Object export",assets},{"Player ESP",espTab},{"Aim",aimTab},{"Explorer",explorerTab},{"Script Maker",makerTab},{"Autoclicker",clickTab},{"AI Chat",aiTab},{"Session",settings},{"Settings",extrasTabs.Settings},{"Version History",extrasTabs.History}}) do
+        local target=entry[2];commands[#commands+1]={Name="Open "..entry[1],Run=function() target:Select() end}
+    end
+    commands[#commands+1]={Name="Emergency stop",Run=Session.Recover}
+    commands[#commands+1]={Name="Restore controls",Run=reset}
+    commands[#commands+1]={Name="Reset camera to player",Run=function() local camera=workspace.CurrentCamera;if camera and humanoid then camera.CameraType=Enum.CameraType.Custom;camera.CameraSubject=humanoid end end}
+    Session.Tools=createSessionTools.Build({Tab=settings,State=state,Controls=profileControls,Commands=commands,Player=Player,Input=Input,RunService=RunService,Notify=notify,Version=Config.Version,Stop=Session.Recover,Open=function() if Window.Open then Window:Open() end;settings:Select() end})
+    table.insert(cleanups,function() Session.Tools:Unload() end)
     home:Select()
     task.spawn(function()
         local ok, info = pcall(Marketplace.GetProductInfo, Marketplace, game.PlaceId)
@@ -3604,6 +3769,8 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    {Version="2.7.0",Date="2026-10-06",Title="Bulk lighting and VFX exports",Changes="Export all Lighting children and readable service settings, all skies, all loaded VFX rigs or original effect objects into one file."},
+    { Version = "2.6.0", Date = "2026-10-06", Title = "Session tools", Changes = "Per-place control profiles, searchable commands, frame/network/memory metrics and F10 emergency stop including AI cancellation." },
     { Version = "2.5.0", Date = "2026-10-05", Title = "Aim controls", Changes = "Added camera aiming, optional Workspace-raycast silent aim, target filters, radius circle, smoothing, range, prediction, wall checks and cleanup." },
     { Version = "2.4.0", Date = "2026-10-05", Title = "Player ESP", Changes = "Added team/enemy/all/specific-player highlights, a live player list, name/health/distance labels, visibility/color/range controls and cleanup." },
     { Version = "2.3.1", Date = "2026-10-05", Title = "Autoclicker fixes", Changes = "Fixed CPS timing drift, cursor drag offsets and touch ownership, viewport changes, restricted-input fallback and restarting during a pending click." },
@@ -3975,6 +4142,7 @@ function Extras.Build(ctx)
     support:Button({ Title = "Check game support", Desc = "Retry the registry lookup without restarting the universal hub.", Callback = check })
     settings:Button({ Title = "Save preferences", Callback = save })
     if prefs.AutoGame or ctx.LocalModule then check() else status:SetDesc("Automatic game loading is off. Use Check game support to load a matching module.") end
+    return {Settings=settings,History=versions}
 end
 return Extras
 
