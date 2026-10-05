@@ -521,7 +521,7 @@ local function classifierReport(value)
     local report=value:lower():match('^%s*(.-)%s*$')
     return report:match('^user safety:%s*[%w_%-]+%s+response safety:%s*[%w_%-]+%s*$')~=nil
 end
-local defaults={['ChatGPT Plus']={Model='gpt-6.1-sol'},OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model=freeChatModel,Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
+local defaults={['ChatGPT Plus']={Model='gpt-5.6-sol'},OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model=freeChatModel,Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
 local system='You are Paraware AI, a Roblox Luau assistant. Reply to the user in natural conversational text, including greetings and follow-up questions. Explain clearly. Use fenced lua or luau code blocks for scripts. You cannot execute scripts or inspect the game unless context is attached. Generated scripts are drafts.'
 function Chat.New(ctx)
     local self={Alive=true,Provider='OpenAI',Profiles={},Chats={},Current=1,Generation=0,Busy=false,Status='Choose a provider and enter its API key in Setup.',Context='',HelperToken='',HelperModels={},HelperId='',Connecting=false}
@@ -593,7 +593,7 @@ function Chat.New(ctx)
                 assert(type(self.HelperModels)=='table' and #self.HelperModels>0,'No ChatGPT models are available for this connection.')
                 local available=false
                 for _,model in ipairs(self.HelperModels) do if model.slug==self.Profiles['ChatGPT Plus'].Model then available=true end end
-                self.Status=available and ('Using ChatGPT plan · '..(status.account or 'Connected')) or 'Connected, but GPT-6.1 Sol is not in this account’s model list. Next ChatGPT model lets you choose an available alternative.'
+                self.Status=available and ('Using ChatGPT plan · '..(status.account or 'Connected')) or ('Connected, but '..self.Profiles['ChatGPT Plus'].Model..' is not in this account’s model list. Next ChatGPT model lets you choose an available alternative.')
             end)
             if not self.Alive or self.Generation~=generation then return end
             self.Connecting=false
@@ -860,9 +860,9 @@ function Chat.Build(ctx)
     button('Sign out of ChatGPT',setup,UDim2.new(0.5,4,0,86),UDim2.new(0.5,-12,0,28),function() chat:DisconnectChatGPT() end)
     ui('TextLabel',{Position=UDim2.fromOffset(8,124),Size=UDim2.new(1,-16,0,50),Text='ChatGPT Plus: start the Paraware ChatGPT helper on this computer, then Continue with ChatGPT. No API key needed. Your plan limits apply.',TextWrapped=true,TextColor3=Color3.fromRGB(180,180,190),TextSize=11,Font=Enum.Font.Gotham,BackgroundTransparency=1},setup)
     local connectionStatus=ui('TextLabel',{Name='AIConnectionStatus',Position=UDim2.fromOffset(8,224),Size=UDim2.new(1,-16,0,76),Text='',TextWrapped=true,TextColor3=Color3.fromRGB(220,220,232),TextSize=12,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,BackgroundTransparency=1},setup)
-    button('Use GPT-6.1 Sol · Medium',setup,UDim2.fromOffset(8,306),UDim2.new(1,-16,0,28),function()
+    button('Use GPT-5.6 Sol',setup,UDim2.fromOffset(8,306),UDim2.new(1,-16,0,28),function()
         if chat.Busy or chat.Connecting then return end
-        chat.Provider='ChatGPT Plus';chat.Profiles[chat.Provider].Model='gpt-6.1-sol';chat.Status='GPT-6.1 Sol · Medium selected. Continue with ChatGPT refreshes model availability.';chat:Changed()
+        chat.Provider='ChatGPT Plus';chat.Profiles[chat.Provider].Model='gpt-5.6-sol';chat.Status='GPT-5.6 Sol selected. Continue with ChatGPT refreshes model availability.';chat:Changed()
     end)
     local function copy(value)
         if type(setclipboard)~='function' then ctx.Notify('Clipboard unavailable.');return end
@@ -882,7 +882,7 @@ function Chat.Build(ctx)
         else keyBox.Visible=true;endpointBox.Visible=true end
         for _,item in ipairs(setup:GetChildren()) do
             if item.Name=='Use key' or item.Name=='Forget keys' then item.Visible=not plan end
-            if item.Name=='Use GPT-6.1 Sol · Medium' then item.Visible=plan end
+            if item.Name=='Use GPT-5.6 Sol' then item.Visible=plan end
         end
         for index,message in ipairs(conversation.Messages) do
             local row=ui('Frame',{Name='AIMessage',Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundColor3=Color3.fromRGB(25,25,31),BorderSizePixel=0,LayoutOrder=index},transcript);rows[#rows+1]=row
