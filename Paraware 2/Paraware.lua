@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.1.0",
+    Version = "2.1.1",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -521,7 +521,7 @@ local function classifierReport(value)
     local report=value:lower():match('^%s*(.-)%s*$')
     return report:match('^user safety:%s*[%w_%-]+%s+response safety:%s*[%w_%-]+%s*$')~=nil
 end
-local defaults={['ChatGPT Plus']={Model=''},OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model=freeChatModel,Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
+local defaults={['ChatGPT Plus']={Model='gpt-6.1-sol'},OpenAI={Model='gpt-5-mini'},Gemini={Model='gemini-3.8-flash'},Claude={Model='claude-sonnet-5-5'},['OpenAI compatible']={Model=freeChatModel,Endpoint='https://openrouter.ai/api/v1/chat/completions'}}
 local system='You are Paraware AI, a Roblox Luau assistant. Reply to the user in natural conversational text, including greetings and follow-up questions. Explain clearly. Use fenced lua or luau code blocks for scripts. You cannot execute scripts or inspect the game unless context is attached. Generated scripts are drafts.'
 function Chat.New(ctx)
     local self={Alive=true,Provider='OpenAI',Profiles={},Chats={},Current=1,Generation=0,Busy=false,Status='Choose a provider and enter its API key in Setup.',Context='',HelperToken='',HelperModels={},HelperId='',Connecting=false}
@@ -577,13 +577,13 @@ function Chat.New(ctx)
                 self.HelperToken=self:HelperCall('/bootstrap','POST',{}).token
                 assert(type(self.HelperToken)=='string' and #self.HelperToken==64,'Invalid helper connection.')
                 local status=self:HelperCall('/status')
-                if not status.sharing then
-                    self:HelperCall('/signin','POST',{})
+                if not status.sharing or status.status=='connecting' then
+                    if status.status~='connecting' then self:HelperCall('/signin','POST',{}) end
                     self.Status='Finish ChatGPT sign-in in your browser and allow plan usage.';self:Changed()
                     for _=1,300 do
                         if not self.Alive or self.Generation~=generation then return end
                         task.wait(2);status=self:HelperCall('/status')
-                        if status.sharing then break end
+                        if status.sharing and status.status~='connecting' then break end
                         assert(status.error==nil or status.error=='',status.error)
                     end
                 end
@@ -591,8 +591,9 @@ function Chat.New(ctx)
                 assert(status.sharing,'ChatGPT plan usage was not enabled. Continue with ChatGPT again.')
                 self.HelperModels=self:HelperCall('/models').models
                 assert(type(self.HelperModels)=='table' and #self.HelperModels>0,'No ChatGPT models are available for this connection.')
-                self.Profiles['ChatGPT Plus'].Model=self.HelperModels[1].slug
-                self.Status='Using ChatGPT plan · '..(status.account or 'Connected')
+                local available=false
+                for _,model in ipairs(self.HelperModels) do if model.slug==self.Profiles['ChatGPT Plus'].Model then available=true end end
+                self.Status=available and ('Using ChatGPT plan · '..(status.account or 'Connected')) or 'Connected, but GPT-6.1 Sol is not in this account’s model list. Next ChatGPT model lets you choose an available alternative.'
             end)
             if not self.Alive or self.Generation~=generation then return end
             self.Connecting=false
@@ -658,7 +659,10 @@ function Chat.New(ctx)
             profile.Model=freeChatModel
         end
         assert(not profile.Model:lower():match('guard') and not profile.Model:lower():match('moderation') and not profile.Model:lower():match('rerank'),'This model is a classifier. Choose a conversational chat model in Setup.')
-        if self.Provider=='ChatGPT Plus' then assert(self.HelperToken~='' and #self.HelperModels>0,'Click Continue with ChatGPT in Setup first.')
+        if self.Provider=='ChatGPT Plus' then
+            assert(self.HelperToken~='' and #self.HelperModels>0,'Click Continue with ChatGPT in Setup first.')
+            local available=false;for _,model in ipairs(self.HelperModels) do if model.slug==profile.Model then available=true end end
+            assert(available,'The selected model is not in your ChatGPT account’s model list. Reconnect to refresh models or choose an available model.')
         else assert(#profile.Key>0,'Enter an API key in Setup first.') end
         assert(profile.Model:match('^[%w%._:/%-]+$') and #profile.Model<=160,'Enter a valid model ID in Setup.')
         local history={};local size=0
@@ -674,7 +678,7 @@ function Chat.New(ctx)
         local headers={['Content-Type']='application/json'};local body,url
         if self.Provider=='ChatGPT Plus' then
             url='http://127.0.0.1:8788/jobs';headers.Authorization='Bearer '..self.HelperToken
-            body={id=self.HelperId..'_'..tostring(self.Generation+1),model=profile.Model,instructions=instructions,input=history}
+            body={id=self.HelperId..'_'..tostring(self.Generation+1),model=profile.Model,instructions=instructions,input=history,reasoningEffort=profile.Model=='gpt-6.1-sol' and 'medium' or nil}
         elseif self.Provider=='OpenAI' then
             headers.Authorization='Bearer '..profile.Key;url='https://api.openai.com/v1/responses'
             body={model=profile.Model,instructions=instructions,input=history,store=false,max_output_tokens=8192}
@@ -855,6 +859,11 @@ function Chat.Build(ctx)
     button('Next ChatGPT model',setup,UDim2.fromOffset(8,86),UDim2.new(0.5,-12,0,28),function() chat:NextChatGPTModel() end)
     button('Sign out of ChatGPT',setup,UDim2.new(0.5,4,0,86),UDim2.new(0.5,-12,0,28),function() chat:DisconnectChatGPT() end)
     ui('TextLabel',{Position=UDim2.fromOffset(8,124),Size=UDim2.new(1,-16,0,50),Text='ChatGPT Plus: start the Paraware ChatGPT helper on this computer, then Continue with ChatGPT. No API key needed. Your plan limits apply.',TextWrapped=true,TextColor3=Color3.fromRGB(180,180,190),TextSize=11,Font=Enum.Font.Gotham,BackgroundTransparency=1},setup)
+    local connectionStatus=ui('TextLabel',{Name='AIConnectionStatus',Position=UDim2.fromOffset(8,224),Size=UDim2.new(1,-16,0,76),Text='',TextWrapped=true,TextColor3=Color3.fromRGB(220,220,232),TextSize=12,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,BackgroundTransparency=1},setup)
+    button('Use GPT-6.1 Sol · Medium',setup,UDim2.fromOffset(8,306),UDim2.new(1,-16,0,28),function()
+        if chat.Busy or chat.Connecting then return end
+        chat.Provider='ChatGPT Plus';chat.Profiles[chat.Provider].Model='gpt-6.1-sol';chat.Status='GPT-6.1 Sol · Medium selected. Continue with ChatGPT refreshes model availability.';chat:Changed()
+    end)
     local function copy(value)
         if type(setclipboard)~='function' then ctx.Notify('Clipboard unavailable.');return end
         local ok=pcall(setclipboard,value);ctx.Notify(ok and 'Copied.' or 'Copy failed.')
@@ -866,8 +875,15 @@ function Chat.Build(ctx)
         title.Text=self.Provider..' · '..self.Current..'/'..#self.Chats..' · '..conversation.Title
         status.Text=self.Status
         providerButton.Text='Provider: '..self.Provider
-        if self.Provider=='ChatGPT Plus' then modelBox.Text=self.Profiles[self.Provider].Model;keyBox.Visible=false;endpointBox.Visible=false
+        local plan=self.Provider=='ChatGPT Plus'
+        connectionStatus.Visible=plan;connectionStatus.Text=self.Status
+        modelBox.TextEditable=not plan
+        if plan then modelBox.Text=self.Profiles[self.Provider].Model;keyBox.Visible=false;endpointBox.Visible=false
         else keyBox.Visible=true;endpointBox.Visible=true end
+        for _,item in ipairs(setup:GetChildren()) do
+            if item.Name=='Use key' or item.Name=='Forget keys' then item.Visible=not plan end
+            if item.Name=='Use GPT-6.1 Sol · Medium' then item.Visible=plan end
+        end
         for index,message in ipairs(conversation.Messages) do
             local row=ui('Frame',{Name='AIMessage',Size=UDim2.new(1,-8,0,0),AutomaticSize=Enum.AutomaticSize.Y,BackgroundColor3=Color3.fromRGB(25,25,31),BorderSizePixel=0,LayoutOrder=index},transcript);rows[#rows+1]=row
             local codes=message.Role=='assistant' and self:Codes(message.Text) or {}
@@ -2800,6 +2816,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    { Version = "2.1.1", Date = "2026-10-05", Title = "Sol Medium preference", Changes = "Added GPT-6.1 Sol with explicit Medium reasoning, visible connection status in Setup and account model availability checks." },
     { Version = "2.1.0", Date = "2026-10-05", Title = "ChatGPT plan connection", Changes = "Added Continue with ChatGPT, available model selection, sign-out and a local helper using the official sign-in flow with encrypted credentials." },
     { Version = "2.0.2", Date = "2026-10-04", Title = "AI connection recovery", Changes = "Added one bounded retry for temporary connection errors, longer timeouts, and faster OpenRouter replies with optional reasoning disabled." },
     { Version = "2.0.1", Date = "2026-10-04", Title = "Conversational AI replies", Changes = "Pinned a free chat model instead of random routing, excluded classifier reports from follow-up history, and added clear wrong-model errors." },
