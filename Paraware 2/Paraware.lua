@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.7.0",
+    Version = "2.8.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -512,8 +512,166 @@ local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
+local createAnimations
 local createSessionTools
 local createAimAssist
+createAnimations = (function()
+local Animations={}
+function Animations.AssetId(content)
+    local text=tostring(content or '')
+    local id=text:match('^%d+$') or text:match('^rbxassetid://(%d+)$') or text:match('[?&]id=(%d+)')
+    if not id or not id:match('[1-9]') or #id>20 then return end
+    return 'rbxassetid://'..id
+end
+function Animations.New(ctx)
+    local self={Alive=true,Entries={},Cache={},Generation=0,Speed=1,Weight=1,Looped=false,Priority='Action',Source='All loaded',Connections={},Status='Scan loaded animations or paste an asset ID.'}
+    local folder=Instance.new('Folder');folder.Name='ParawareAnimationLibrary';self.Folder=folder
+    function self:Changed(message) if message then self.Status=message end;if self.OnChanged then self.OnChanged() end end
+    function self:IsOwned(object) return object==folder or object and object.IsDescendantOf and object:IsDescendantOf(folder) or object~=nil and object==self.PreviewAsset end
+    function self:Asset(entry)
+        if not self.Cache[entry.Id] then local asset=Instance.new('Animation');asset.Name=entry.Name;asset.AnimationId=entry.Id;asset.Parent=folder;self.Cache[entry.Id]=asset end
+        return self.Cache[entry.Id]
+    end
+    function self:Select(entry) self.Selected=entry;self:Changed(entry and (entry.Name..'\n'..entry.Id..'\n'..entry.Path..'\n'..entry.Count..' loaded reference(s).') or 'Choose an animation.') end
+    function self:AddId(value)
+        local id=Animations.AssetId(value);if not id then self:Changed('Enter a numeric animation ID or rbxassetid URI.');return false end
+        local entry={Id=id,Name='Animation_'..id:match('%d+'),Path='Manual asset ID',Count=1};self:Select(entry);return true
+    end
+    function self:Scan()
+        local byId,entries={},{}
+        local function add(animation,path)
+            if not animation or animation==self.PreviewAsset or self:IsOwned(animation) then return end
+            local id=Animations.AssetId(animation.AnimationId);if not id then return end
+            if byId[id] then byId[id].Count=byId[id].Count+1;return end
+            local entry={Id=id,Name=animation.Name~='' and animation.Name or 'Animation',Path=path,Count=1}
+            byId[id]=entry;entries[#entries+1]=entry
+        end
+        local ok,objects=pcall(game.GetDescendants,game)
+        if not ok then self:Changed('Animation scan failed: '..tostring(objects):sub(1,180));return false end
+        for _,object in ipairs(objects) do
+            if not ctx.IsInternal or not ctx.IsInternal(object) then
+                if self.Source=='All loaded' and object:IsA('Animation') then pcall(add,object,object:GetFullName()) end
+                if object:IsA('Animator') then
+                    local got,tracks=pcall(object.GetPlayingAnimationTracks,object)
+                    if got then for _,track in ipairs(tracks) do if track~=self.Track then pcall(function() add(track.Animation,object:GetFullName()..' (playing)') end) end end end
+                end
+            end
+        end
+        table.sort(entries,function(a,b) if a.Name==b.Name then return a.Id<b.Id end;return a.Name<b.Name end)
+        local selectedId=self.Selected and self.Selected.Id
+        self.Entries=entries
+        for _,entry in ipairs(entries) do if entry.Id==selectedId then self.Selected=entry;break end end
+        self:Changed(#entries..' unique animation asset(s) found. Loaded references and playing tracks only.');return true
+    end
+    function self:Stop(message)
+        self.Generation=self.Generation+1
+        if self.StoppedConnection then self.StoppedConnection:Disconnect();self.StoppedConnection=nil end
+        if self.DeathConnection then self.DeathConnection:Disconnect();self.DeathConnection=nil end
+        local track=self.Track;self.Track=nil;self.PlayingEntry=nil;self.Paused=false
+        if track then pcall(track.Stop,track,.15);pcall(track.Destroy,track) end
+        if self.PreviewAsset then self.PreviewAsset:Destroy();self.PreviewAsset=nil end
+        if message then self:Changed(message) end
+    end
+    function self:Play()
+        if not self.Selected then self:Changed('Choose an animation first.');return false end
+        local entry=self.Selected
+        self:Stop();local generation=self.Generation;local character=ctx.Player.Character
+        local humanoid=character and character:FindFirstChildOfClass('Humanoid')
+        local animator=humanoid and humanoid:FindFirstChildOfClass('Animator')
+        if ctx.Animator then animator=ctx.Animator end
+        if not humanoid or humanoid.Health<=0 or not animator then self:Changed('Your living character needs a Humanoid and Animator.');return false end
+        local asset=Instance.new('Animation');asset.Name='ParawareAnimationPreview';asset.AnimationId=entry.Id;self.PreviewAsset=asset
+        local ok,track=pcall(animator.LoadAnimation,animator,asset)
+        if not self.Alive or self.Generation~=generation or ctx.Player.Character~=character then
+            if ok and track then pcall(track.Stop,track,0);pcall(track.Destroy,track) end
+            if self.PreviewAsset==asset then self:Stop() end
+            return false
+        end
+        if not ok or not track then self:Stop('Preview could not load. Check animation permissions and rig compatibility. '..tostring(track):sub(1,130));return false end
+        self.Track=track;self.PlayingEntry=entry
+        local played,err=pcall(function() track.Looped=self.Looped;track.Priority=Enum.AnimationPriority[self.Priority];track:Play(.15,self.Weight,self.Speed) end)
+        if not played then self:Stop('Preview failed: '..tostring(err):sub(1,180));return false end
+        if track.Stopped then self.StoppedConnection=track.Stopped:Connect(function() if self.Track==track then self:Stop('Preview finished.') end end) end
+        if humanoid.Died then self.DeathConnection=humanoid.Died:Connect(function() self:Stop('Preview stopped after death.') end) end
+        self:Changed('Preview playing on your character. Other tracks are not stopped.');return true
+    end
+    function self:Pause()
+        if not self.Track then self:Changed('Play a preview first.');return end
+        self.Paused=not self.Paused;self.Track:AdjustSpeed(self.Paused and 0 or self.Speed);self:Changed(self.Paused and 'Preview paused.' or 'Preview resumed.')
+    end
+    function self:Seek(percent)
+        if not self.Track or self.Track.Length<=0 then self:Changed('Animation duration is not available yet.');return end
+        self.Track.TimePosition=math.clamp(tonumber(percent) or 0,0,100)/100*self.Track.Length
+    end
+    function self:FetchClip()
+        if self.ClipBusy then self:Changed('An animation-data request is already pending.');return end
+        if not self.Selected then self:Changed('Choose an animation first.');return end
+        local entry=self.Selected;local generation=self.Generation
+        self.ClipBusy=true;self:Changed('Loading animation data for '..entry.Id..'...')
+        local ok,clip=pcall(function()
+            local provider=ctx.ClipProvider or game:GetService('AnimationClipProvider')
+            return provider:GetAnimationClipAsync(entry.Id)
+        end)
+        self.ClipBusy=false
+        if not self.Alive or generation~=self.Generation then if ok and clip then clip:Destroy() end;return end
+        if not ok or not clip then self:Changed('Animation data unavailable. This runtime or asset permissions may prevent loading. '..tostring(clip):sub(1,160));return end
+        if not clip:IsA('KeyframeSequence') and not clip:IsA('CurveAnimation') then clip:Destroy();self:Changed('Provider returned an unsupported animation clip.');return end
+        if self.Clip then self.Clip:Destroy() end
+        clip.Name=entry.Name..'_AnimationData';clip.Parent=folder;self.Clip=clip
+        self:Changed('Animation data loaded. Preparing export.');return clip
+    end
+    function self:ExportTargets(all)
+        if all and not self:Scan() then return {} end
+        local entries=all and self.Entries or (self.Selected and {self.Selected} or {})
+        local targets={};for _,entry in ipairs(entries) do targets[#targets+1]=self:Asset(entry) end;return targets
+    end
+    self.Connections[#self.Connections+1]=ctx.Player.CharacterAdded:Connect(function() self:Stop('Preview stopped after respawn.') end)
+    function self:Unload() self:Stop();self.Alive=false;for _,connection in ipairs(self.Connections) do connection:Disconnect() end;folder:Destroy();self.OnChanged=nil end
+    return self
+end
+function Animations.Build(ctx)
+    local self=Animations.New(ctx);local tab=ctx.Tab:Section({Title='Animation export',Icon='person-standing',Opened=false,Box=true})
+    tab:Paragraph({Title='Browse and preview animations',Desc='Find loaded Animation instances and active Animator tracks. Preview on your own character, copy IDs or export Animation references as .rbxm. R6/R15 compatibility and asset permissions still apply; animation-data export requires supported runtime access and asset permissions.'})
+    local status=tab:Paragraph({Title='Animation status',Desc=self.Status})
+    local picker,entries
+    self.OnChanged=function() status:SetDesc(self.Status) end
+    local function refresh()
+        if not self:Scan() then return end
+        local values={};entries={}
+        for _,entry in ipairs(self.Entries) do local key=entry.Name..' ['..entry.Id:match('%d+')..']';values[#values+1]=key;entries[key]=entry end
+        picker:Refresh(#values>0 and values or {'No loaded animations'})
+        local choice=values[1]
+        if self.Selected then for key,entry in pairs(entries) do if entry.Id==self.Selected.Id then choice=key;break end end end
+        if choice then picker:Select(choice);self:Select(entries[choice]) else self:Select(nil) end
+    end
+    tab:Dropdown({Title='Animation source',Values={'All loaded','Playing animations'},Value='All loaded',Callback=function(value) self.Source=value;if picker then refresh() end end})
+    picker=tab:Dropdown({Title='Animation',SearchBarEnabled=true,Values={'Rescan to find animations'},Value='Rescan to find animations',Callback=function(value) self:Select(entries and entries[value]) end})
+    tab:Button({Title='Rescan animations',Icon='refresh-cw',Callback=refresh})
+    local manual=''
+    tab:Input({Title='Animation asset ID',Placeholder='123456 or rbxassetid://123456',Value='',Callback=function(value) manual=tostring(value):sub(1,180) end})
+    tab:Button({Title='Use animation ID',Callback=function() self:AddId(manual) end})
+    tab:Button({Title='Play on my character',Icon='play',Callback=function() self:Play() end})
+    tab:Button({Title='Pause / resume animation',Callback=function() self:Pause() end})
+    tab:Button({Title='Stop animation preview',Icon='square',Callback=function() self:Stop('Preview stopped.') end})
+    tab:Toggle({Title='Loop animation preview',Value=false,Callback=function(value) self.Looped=value;if self.Track then self.Track.Looped=value end end})
+    tab:Slider({Title='Animation speed',Step=.1,Value={Min=.1,Max=3,Default=1},Callback=function(value) self.Speed=math.clamp(tonumber(value) or 1,.1,3);if self.Track and not self.Paused then self.Track:AdjustSpeed(self.Speed) end end})
+    tab:Slider({Title='Animation weight',Step=.05,Value={Min=0,Max=1,Default=1},Callback=function(value) self.Weight=math.clamp(tonumber(value) or 1,0,1);if self.Track then self.Track:AdjustWeight(self.Weight,.15) end end})
+    tab:Dropdown({Title='Preview priority',Values={'Movement','Action','Action2','Action3','Action4'},Value='Action',Callback=function(value) self.Priority=value;if self.Track then self.Track.Priority=Enum.AnimationPriority[value] end end})
+    tab:Slider({Title='Seek animation (%)',Step=1,Value={Min=0,Max=100,Default=0},Callback=function(value) self:Seek(value) end})
+    tab:Button({Title='Copy animation ID',Icon='copy',Callback=function() if not self.Selected then ctx.Notify('Choose an animation first.');return end;local ok=type(setclipboard)=='function' and pcall(setclipboard,self.Selected.Id);ctx.Notify(ok and 'Animation ID copied.' or 'Clipboard unavailable.') end})
+    tab:Button({Title='Export selected animation',Icon='download',Callback=function() ctx.Export('Animation') end})
+    tab:Button({Title='Export animation data',Desc='Try loading an allowed KeyframeSequence or CurveAnimation and save its data as .rbxm.',Callback=function() ctx.Export('Animation clip') end})
+    tab:Button({Title='Export all animations',Desc='Fresh scan, unique asset IDs, one file. Exports references, not keyframe data.',Callback=function() ctx.Export('All animations') end})
+    local clock=0
+    self.Connections[#self.Connections+1]=ctx.RunService.RenderStepped:Connect(function(dt)
+        if not self.Track then return end;clock=clock+(dt or 0);if clock<.5 then return end;clock=0
+        local track=self.Track;status:SetDesc((self.Paused and 'Paused' or 'Playing')..string.format(' · %.1f / %.1f seconds',track.TimePosition,track.Length)..'\n'..self.PlayingEntry.Id..' · '..tostring(self.Speed)..'×\nDuration 0 or no motion can indicate loading, permissions or a rig mismatch.')
+    end)
+    return self
+end
+return Animations
+
+end)()
 createSessionTools = (function()
 local Tools={}
 local fields={Speed={0,150},JumpPower={0,200},JumpHeight={0,50},FlySpeed={5,200},Fov={40,120}}
@@ -2187,6 +2345,7 @@ local function overHub(position)
 end
 
 local function ownUI(object)
+    if Session.Animations and Session.Animations:IsOwned(object) then return true end
     local aimOverlay=Session.Aim and Session.Aim.Overlay
     if aimOverlay and (object==aimOverlay or (object.IsDescendantOf and object:IsDescendantOf(aimOverlay))) then return true end
     if Session.PlayerESP and Session.PlayerESP:IsOwned(object) then return true end
@@ -2337,8 +2496,14 @@ local function exportSelection(category)
     refreshSelection()
     local eligible, targets = {}, {}
     local lightingOnly=category=="Lighting"
-    local bulk=lightingOnly or category=="Skies" or category=="All VFX" or category=="All VFX original"
-    if bulk then
+    local bulk=lightingOnly or category=="Skies" or category=="All VFX" or category=="All VFX original" or category=="All animations"
+    if category=="Animation clip" then
+        local clip=Session.Animations:FetchClip()
+        if not clip then exportMessage("Animation data unavailable",Session.Animations.Status);return end
+        if exportBusy then exportMessage("Export busy","Another export started while animation data was loading. Retry when it finishes.");return end
+        eligible={clip}
+    elseif category=="Animation" or category=="All animations" then eligible=Session.Animations:ExportTargets(category=="All animations")
+    elseif bulk then
         local ok,result=pcall(collectBulk,category)
         if not ok then exportMessage("Scan failed",tostring(result));return end
         eligible=result
@@ -2358,7 +2523,7 @@ local function exportSelection(category)
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 and not lightingOnly then exportMessage("Nothing to export", (category=="Skies") and "No loaded skies were found in Lighting." or (category=="All VFX" or category=="All VFX original") and "No loaded supported VFX were found." or (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
+    if #targets == 0 and not lightingOnly then exportMessage("Nothing to export",(category=="Animation" or category=="All animations") and "Choose or scan a loaded animation first." or  (category=="Skies") and "No loaded skies were found in Lighting." or (category=="All VFX" or category=="All VFX original") and "No loaded supported VFX were found." or (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
     if not bulk and category ~= "Game UI" and exportLayout == "Separate files" then
@@ -2366,7 +2531,7 @@ local function exportSelection(category)
     else batches[1] = targets end
     local filename = customFilename
     if category == "Game UI" and filename == "" then filename = "GameUI-" .. game.PlaceId end
-    if bulk and filename=="" then filename=(lightingOnly and "Lighting" or category=="Skies" and "Skies" or "AllVFX").."-"..game.PlaceId end
+    if bulk and filename=="" then filename=(lightingOnly and "Lighting" or category=="Skies" and "Skies" or category=="All animations" and "Animations" or "AllVFX").."-"..game.PlaceId end
     exportBusy, cancelExport = true, false
     exportMessage("Preparing export", #targets .. " root(s), " .. #batches .. " file(s). Loading the exporter...")
     task.spawn(function()
@@ -2402,7 +2567,7 @@ local function exportSelection(category)
                         end
                     end
                     if category == "VFX" then exportRig = buildVfxRig(batch[1], false); saveTargets = { exportRig.Model } end
-                    local group = (lightingOnly or category=="Skies") and "Lighting" or (category == "VFX" or category == "VFX original" or category=="All VFX" or category=="All VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
+                    local group = (category=="Animation" or category=="Animation clip" or category=="All animations") and "Animations" or (lightingOnly or category=="Skies") and "Lighting" or (category == "VFX" or category == "VFX original" or category=="All VFX" or category=="All VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
                     if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
                     local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
@@ -2886,6 +3051,7 @@ local function build()
         cancelExport = exportBusy and true or false
         maker:StopAll()
         Session.AIChat:Cancel()
+        if Session.Animations then Session.Animations:Stop("Preview stopped by emergency recovery.") end
         Session.PlayerESP:SetEnabled(false)
         Session.Aim:Stop()
         Session.Autoclicker:Stop("Stopped by session recovery.")
@@ -3135,6 +3301,8 @@ local function build()
         local copied = pcall(setclipboard, vfxChoice:GetFullName())
         notify(copied and "Effect path copied." or "Could not copy effect path.")
     end })
+    Session.Animations=createAnimations.Build({Tab=assets,Player=Player,RunService=RunService,Notify=notify,IsInternal=ownUI,Export=exportSelection})
+    table.insert(cleanups,function() Session.Animations:Unload() end)
     exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Select models with the picker, or use Export whole game UI." })
     historyStatus = assets:Paragraph({ Title = "Recent exports", Desc = "No files saved this session." })
     assets:Button({ Title = "Copy export history", Callback = function()
@@ -3769,6 +3937,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    {Version="2.8.0",Date="2026-10-06",Title="Animation browser and preview",Changes="Loaded/playing animation discovery, character previews with playback controls, ID copy, selected/all references and optional allowed animation-data exports."},
     {Version="2.7.0",Date="2026-10-06",Title="Bulk lighting and VFX exports",Changes="Export all Lighting children and readable service settings, all skies, all loaded VFX rigs or original effect objects into one file."},
     { Version = "2.6.0", Date = "2026-10-06", Title = "Session tools", Changes = "Per-place control profiles, searchable commands, frame/network/memory metrics and F10 emergency stop including AI cancellation." },
     { Version = "2.5.0", Date = "2026-10-05", Title = "Aim controls", Changes = "Added camera aiming, optional Workspace-raycast silent aim, target filters, radius circle, smoothing, range, prediction, wall checks and cleanup." },
