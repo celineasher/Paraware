@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.8.0",
+    Version = "2.9.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -517,6 +517,21 @@ local createSessionTools
 local createAimAssist
 createAnimations = (function()
 local Animations={}
+local locomotion={idle=true,walk=true,run=true,jump=true,fall=true,climb=true,swim=true,swimidle=true,sit=true}
+local emoteSlots={wave=true,point=true,dance=true,dance2=true,dance3=true,laugh=true,cheer=true}
+local categoryOrder={'Character animations','In-game animations','Emotes'}
+local function descendants(object)
+    local ok,result=pcall(function() return object:GetDescendants() end)
+    return ok and result or {}
+end
+local function animateRoot(character)
+    return character and character:FindFirstChild('Animate')
+end
+local function slotOf(animation,animate)
+    local node=animation
+    while node and node.Parent~=animate do node=node.Parent end
+    return node and tostring(node.Name):lower()
+end
 function Animations.AssetId(content)
     local text=tostring(content or '')
     local id=text:match('^%d+$') or text:match('^rbxassetid://(%d+)$') or text:match('[?&]id=(%d+)')
@@ -524,7 +539,7 @@ function Animations.AssetId(content)
     return 'rbxassetid://'..id
 end
 function Animations.New(ctx)
-    local self={Alive=true,Entries={},Cache={},Generation=0,Speed=1,Weight=1,Looped=false,Priority='Action',Source='All loaded',Connections={},Status='Scan loaded animations or paste an asset ID.'}
+    local self={Alive=true,Entries={},Cache={},Generation=0,Speed=1,Weight=1,Looped=false,Priority='Action',Source='All loaded',Category='All categories',Overrides={},Connections={},Status='Scan loaded animations or paste an asset ID.'}
     local folder=Instance.new('Folder');folder.Name='ParawareAnimationLibrary';self.Folder=folder
     function self:Changed(message) if message then self.Status=message end;if self.OnChanged then self.OnChanged() end end
     function self:IsOwned(object) return object==folder or object and object.IsDescendantOf and object:IsDescendantOf(folder) or object~=nil and object==self.PreviewAsset end
@@ -532,19 +547,65 @@ function Animations.New(ctx)
         if not self.Cache[entry.Id] then local asset=Instance.new('Animation');asset.Name=entry.Name;asset.AnimationId=entry.Id;asset.Parent=folder;self.Cache[entry.Id]=asset end
         return self.Cache[entry.Id]
     end
-    function self:Select(entry) self.Selected=entry;self:Changed(entry and (entry.Name..'\n'..entry.Id..'\n'..entry.Path..'\n'..entry.Count..' loaded reference(s).') or 'Choose an animation.') end
+    function self:Select(entry) self.Selected=entry;self:Changed(entry and (entry.Name..'\n'..entry.Id..'\n'..entry.Path..'\n'..entry.Count..' loaded reference(s).\n'..(entry.Category or 'Manual asset ID')) or 'Choose an animation.') end
     function self:AddId(value)
         local id=Animations.AssetId(value);if not id then self:Changed('Enter a numeric animation ID or rbxassetid URI.');return false end
         local entry={Id=id,Name='Animation_'..id:match('%d+'),Path='Manual asset ID',Count=1};self:Select(entry);return true
     end
+    function self:Catalog()
+        local tags,configured={},{}
+        local function mark(id,category,name,path)
+            id=Animations.AssetId(id);if not id then return end
+            tags[id]=tags[id] or {};tags[id][category]=true
+            configured[#configured+1]={Id=id,Name=name,Path=path,Category=category}
+        end
+        local characters={};local seen={}
+        local function addCharacter(character) if character and not seen[character] then seen[character]=true;characters[#characters+1]=character end end
+        addCharacter(ctx.Player.Character)
+        pcall(function() for _,player in ipairs((ctx.Players or game:GetService('Players')):GetPlayers()) do addCharacter(player.Character) end end)
+        for _,character in ipairs(characters) do
+            local animate=animateRoot(character)
+            if animate then
+                for _,animation in ipairs(descendants(animate)) do
+                    if animation:IsA('Animation') then
+                        local slot=slotOf(animation,animate)
+                        local category=locomotion[slot] and 'Character animations' or emoteSlots[slot] and 'Emotes'
+                        if category then mark(animation.AnimationId,category,animation.Name,animation:GetFullName()) end
+                    end
+                end
+            end
+            local humanoid=character:FindFirstChildOfClass('Humanoid')
+            if humanoid then
+                local ok,description=pcall(humanoid.GetAppliedDescription,humanoid)
+                if ok and description then
+                    local got,emotes=pcall(description.GetEmotes,description)
+                    if got and type(emotes)=='table' then
+                        for name,ids in pairs(emotes) do if type(ids)=='table' then for _,id in ipairs(ids) do mark(id,'Emotes',tostring(name),'Character avatar emote catalog') end end end
+                    end
+                    pcall(description.Destroy,description)
+                end
+            end
+        end
+        return tags,configured
+    end
     function self:Scan()
         local byId,entries={},{}
+        local tags,configured=self:Catalog()
+        local function addId(id,name,path,category)
+            id=Animations.AssetId(id);if not id then return end
+            local entry=byId[id]
+            if not entry then entry={Id=id,Name=type(name)=='string' and name~='' and name or 'Animation',Path=path,Count=0,Categories={}};byId[id]=entry;entries[#entries+1]=entry end
+            entry.Count=entry.Count+1
+            if category then entry.Categories[category]=true end
+            if tags[id] then for tag in pairs(tags[id]) do entry.Categories[tag]=true end
+            elseif not category then entry.Categories['In-game animations']=true end
+        end
         local function add(animation,path)
             if not animation or animation==self.PreviewAsset or self:IsOwned(animation) then return end
-            local id=Animations.AssetId(animation.AnimationId);if not id then return end
-            if byId[id] then byId[id].Count=byId[id].Count+1;return end
-            local entry={Id=id,Name=animation.Name~='' and animation.Name or 'Animation',Path=path,Count=1}
-            byId[id]=entry;entries[#entries+1]=entry
+            local category
+            local node=animation.Parent
+            while node do if tostring(node.Name):lower()=='emotes' or tostring(node.Name):lower()=='emote' then category='Emotes';break end;node=node.Parent end
+            addId(animation.AnimationId,animation.Name,path,category)
         end
         local ok,objects=pcall(game.GetDescendants,game)
         if not ok then self:Changed('Animation scan failed: '..tostring(objects):sub(1,180));return false end
@@ -557,11 +618,62 @@ function Animations.New(ctx)
                 end
             end
         end
-        table.sort(entries,function(a,b) if a.Name==b.Name then return a.Id<b.Id end;return a.Name<b.Name end)
+        if self.Source=='All loaded' then for _,entry in ipairs(configured) do if not byId[entry.Id] then addId(entry.Id,entry.Name,entry.Path,entry.Category) end end end
+        self.Counts={};local filtered={}
+        for _,entry in ipairs(entries) do
+            local labels={}
+            for _,category in ipairs(categoryOrder) do if entry.Categories[category] then self.Counts[category]=(self.Counts[category] or 0)+1;labels[#labels+1]=category end end
+            entry.Category=table.concat(labels,' / ')
+            if self.Category=='All categories' or entry.Categories[self.Category] then filtered[#filtered+1]=entry end
+        end
+        table.sort(filtered,function(a,b) if a.Name==b.Name then return a.Id<b.Id end;return a.Name<b.Name end)
         local selectedId=self.Selected and self.Selected.Id
-        self.Entries=entries
-        for _,entry in ipairs(entries) do if entry.Id==selectedId then self.Selected=entry;break end end
-        self:Changed(#entries..' unique animation asset(s) found. Loaded references and playing tracks only.');return true
+        self.Entries=filtered
+        for _,entry in ipairs(filtered) do if entry.Id==selectedId then self.Selected=entry;break end end
+        self:Changed(#filtered..' unique animation asset(s) in '..self.Category..'.');return true
+    end
+    function self:CustomChanged(message)
+        self:Changed(message)
+        if self.OnCustomChanged then self.OnCustomChanged(message) end
+    end
+    function self:RestoreCustom(silent)
+        local restored,preserved=0,0
+        for animation,record in pairs(self.Overrides) do
+            pcall(function()
+                if animation.Parent then
+                    if animation.AnimationId==record.Applied then animation.AnimationId=record.Original;restored=restored+1 else preserved=preserved+1 end
+                end
+            end)
+        end
+        self.Overrides={}
+        local message='Restored '..restored..' animation reference(s). '..preserved..' later game changes kept. Change movement state to reload the animation.'
+        if not silent then self:Changed(message) end
+        if self.OnCustomChanged then self.OnCustomChanged(message) end
+    end
+    function self:ApplyCustom(slot,value)
+        local key=tostring(slot):lower()
+        if not locomotion[key] then self:CustomChanged('Choose a supported character animation slot.');return false end
+        local id=Animations.AssetId(value);if not id then self:CustomChanged('Enter a valid custom animation ID.');return false end
+        local character=ctx.Player.Character;local animate=animateRoot(character)
+        if not animate then self:CustomChanged('Your character has no supported Animate configuration. Custom controllers need game-specific support.');return false end
+        local targets={}
+        for _,animation in ipairs(descendants(animate)) do if animation:IsA('Animation') and slotOf(animation,animate)==key then targets[#targets+1]=animation end end
+        if #targets==0 then self:CustomChanged('No configured '..slot..' Animation slots were found.');return false end
+        local changes={}
+        local ok,err=pcall(function()
+            for _,animation in ipairs(targets) do
+                local before=animation.AnimationId
+                changes[#changes+1]={Object=animation,Before=before}
+                animation.AnimationId=id
+            end
+        end)
+        if not ok then for _,change in ipairs(changes) do pcall(function() if change.Object.AnimationId==id then change.Object.AnimationId=change.Before end end) end;self:CustomChanged('Could not apply custom animation: '..tostring(err):sub(1,160));return false end
+        for _,change in ipairs(changes) do
+            local record=self.Overrides[change.Object]
+            local original=record and record.Applied==change.Before and record.Original or change.Before
+            self.Overrides[change.Object]={Original=original,Applied=id}
+        end
+        self:CustomChanged('Custom '..slot..' applied to '..#targets..' reference(s). Change movement state to reload. Only this character was changed; permissions and rig compatibility apply.');return true
     end
     function self:Stop(message)
         self.Generation=self.Generation+1
@@ -625,8 +737,8 @@ function Animations.New(ctx)
         local entries=all and self.Entries or (self.Selected and {self.Selected} or {})
         local targets={};for _,entry in ipairs(entries) do targets[#targets+1]=self:Asset(entry) end;return targets
     end
-    self.Connections[#self.Connections+1]=ctx.Player.CharacterAdded:Connect(function() self:Stop('Preview stopped after respawn.') end)
-    function self:Unload() self:Stop();self.Alive=false;for _,connection in ipairs(self.Connections) do connection:Disconnect() end;folder:Destroy();self.OnChanged=nil end
+    self.Connections[#self.Connections+1]=ctx.Player.CharacterAdded:Connect(function() self:Stop('Preview stopped after respawn.');self:RestoreCustom(true) end)
+    function self:Unload() self:Stop();self:RestoreCustom(true);self.Alive=false;for _,connection in ipairs(self.Connections) do connection:Disconnect() end;folder:Destroy();self.OnChanged=nil;self.OnCustomChanged=nil end
     return self
 end
 function Animations.Build(ctx)
@@ -634,16 +746,19 @@ function Animations.Build(ctx)
     tab:Paragraph({Title='Browse and preview animations',Desc='Find loaded Animation instances and active Animator tracks. Preview on your own character, copy IDs or export Animation references as .rbxm. R6/R15 compatibility and asset permissions still apply; animation-data export requires supported runtime access and asset permissions.'})
     local status=tab:Paragraph({Title='Animation status',Desc=self.Status})
     local picker,entries
+    local categories=tab:Paragraph({Title='Animation categories',Desc='Character: standard Animate movement slots. Emotes: configured avatar/Animate emotes and Emotes folders. In-game: other loaded animation assets. Custom game controllers may use different layouts.'})
     self.OnChanged=function() status:SetDesc(self.Status) end
     local function refresh()
         if not self:Scan() then return end
+        categories:SetDesc('Character animations: '..(self.Counts['Character animations'] or 0)..' · In-game animations: '..(self.Counts['In-game animations'] or 0)..' · Emotes: '..(self.Counts.Emotes or 0)..'\nCounts follow the loaded/playing source filter. Some assets can belong to more than one category.')
         local values={};entries={}
         for _,entry in ipairs(self.Entries) do local key=entry.Name..' ['..entry.Id:match('%d+')..']';values[#values+1]=key;entries[key]=entry end
         picker:Refresh(#values>0 and values or {'No loaded animations'})
         local choice=values[1]
         if self.Selected then for key,entry in pairs(entries) do if entry.Id==self.Selected.Id then choice=key;break end end end
-        if choice then picker:Select(choice);self:Select(entries[choice]) else self:Select(nil) end
+        if choice then picker:Select(choice);self:Select(entries[choice]) else self:Select(nil);self:Changed('No animations found in '..self.Category..'.') end
     end
+    tab:Dropdown({Title='Animation category',Values={'Character animations','In-game animations','Emotes','All categories'},Value='All categories',Callback=function(value) self.Category=value;if picker then refresh() end end})
     tab:Dropdown({Title='Animation source',Values={'All loaded','Playing animations'},Value='All loaded',Callback=function(value) self.Source=value;if picker then refresh() end end})
     picker=tab:Dropdown({Title='Animation',SearchBarEnabled=true,Values={'Rescan to find animations'},Value='Rescan to find animations',Callback=function(value) self:Select(entries and entries[value]) end})
     tab:Button({Title='Rescan animations',Icon='refresh-cw',Callback=refresh})
@@ -661,7 +776,17 @@ function Animations.Build(ctx)
     tab:Button({Title='Copy animation ID',Icon='copy',Callback=function() if not self.Selected then ctx.Notify('Choose an animation first.');return end;local ok=type(setclipboard)=='function' and pcall(setclipboard,self.Selected.Id);ctx.Notify(ok and 'Animation ID copied.' or 'Clipboard unavailable.') end})
     tab:Button({Title='Export selected animation',Icon='download',Callback=function() ctx.Export('Animation') end})
     tab:Button({Title='Export animation data',Desc='Try loading an allowed KeyframeSequence or CurveAnimation and save its data as .rbxm.',Callback=function() ctx.Export('Animation clip') end})
-    tab:Button({Title='Export all animations',Desc='Fresh scan, unique asset IDs, one file. Exports references, not keyframe data.',Callback=function() ctx.Export('All animations') end})
+    tab:Button({Title='Export all animations',Desc='Fresh scan of the chosen category/source, unique asset IDs, one file. Exports references, not keyframe data.',Callback=function() ctx.Export('All animations') end})
+    local custom=ctx.Tab:Section({Title='Custom character animations',Icon='user-round',Opened=false,Box=true})
+    custom:Paragraph({Title='Replace a movement slot',Desc='Use a compatible animation for your own character’s existing Animate configuration. Idle replaces every weighted idle reference. Walk/run/jump/fall/climb/swim slots stay separate. Changes are restored on respawn, recovery and unload; they are not applied automatically to new characters. A state change may be needed to reload.'})
+    local customStatus=custom:Paragraph({Title='Character animation status',Desc='No custom movement slots replaced.'})
+    self.OnCustomChanged=function(message) customStatus:SetDesc(message) end
+    local slot,id='Idle',''
+    custom:Dropdown({Title='Character animation slot',Values={'Idle','Walk','Run','Jump','Fall','Climb','Swim','Swimidle','Sit'},Value='Idle',Callback=function(value) slot=value end})
+    custom:Input({Title='Custom character animation ID',Placeholder='Animation asset ID',Value='',Callback=function(value) id=tostring(value):sub(1,180) end})
+    custom:Button({Title='Apply custom character animation',Callback=function() self:ApplyCustom(slot,id) end})
+    custom:Button({Title='Use selected animation for slot',Callback=function() if self.Selected then self:ApplyCustom(slot,self.Selected.Id) else self:Changed('Choose an animation first.') end end})
+    custom:Button({Title='Restore character animations',Callback=function() self:RestoreCustom() end})
     local clock=0
     self.Connections[#self.Connections+1]=ctx.RunService.RenderStepped:Connect(function(dt)
         if not self.Track then return end;clock=clock+(dt or 0);if clock<.5 then return end;clock=0
@@ -3051,7 +3176,7 @@ local function build()
         cancelExport = exportBusy and true or false
         maker:StopAll()
         Session.AIChat:Cancel()
-        if Session.Animations then Session.Animations:Stop("Preview stopped by emergency recovery.") end
+        if Session.Animations then Session.Animations:Stop("Preview stopped by emergency recovery.");Session.Animations:RestoreCustom(true) end
         Session.PlayerESP:SetEnabled(false)
         Session.Aim:Stop()
         Session.Autoclicker:Stop("Stopped by session recovery.")
@@ -3937,6 +4062,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    {Version="2.9.0",Date="2026-10-06",Title="Animation categories and custom character slots",Changes="Separated character, in-game and emote browsing/exports; added reversible custom Animate movement-slot replacement."},
     {Version="2.8.0",Date="2026-10-06",Title="Animation browser and preview",Changes="Loaded/playing animation discovery, character previews with playback controls, ID copy, selected/all references and optional allowed animation-data exports."},
     {Version="2.7.0",Date="2026-10-06",Title="Bulk lighting and VFX exports",Changes="Export all Lighting children and readable service settings, all skies, all loaded VFX rigs or original effect objects into one file."},
     { Version = "2.6.0", Date = "2026-10-06", Title = "Session tools", Changes = "Per-place control profiles, searchable commands, frame/network/memory metrics and F10 emergency stop including AI cancellation." },
