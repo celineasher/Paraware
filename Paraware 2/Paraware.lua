@@ -3,7 +3,7 @@
 -- License: https://github.com/luau/UniversalSynSaveInstance/blob/main/LICENSE
 -- Separate game modules are registered in games/registry.json.
 local Config = {
-    Version = "2.9.0",
+    Version = "2.10.0",
     GameBaseUrl = "https://raw.githubusercontent.com/celineasher/Paraware/main/Paraware%202/games/",
     LogoAsset = "rbxassetid://101729681688072", -- Your supplied PW logo.
     LogoFile = "paraware-logo.png", -- Relative to the executor's workspace folder.
@@ -512,9 +512,139 @@ local scriptLibrary
 local createObjectPicker
 local createHubExtras
 local preferences
+local createMaterials
 local createAnimations
 local createSessionTools
 local createAimAssist
+createMaterials = (function()
+local Materials={}
+local maps={{Key='ColorMap',Title='Base color',Help='The color texture.'},{Key='MetalnessMap',Title='Metalness',Help='Black: non-metal. White: metal.'},{Key='RoughnessMap',Title='Roughness',Help='Black: smooth. White: rough.'},{Key='NormalMap',Title='Normal',Help='Surface direction and fine detail.'}}
+function Materials.Read(object,key)
+    local ok,value=pcall(function() return object[key] end)
+    if ok then return value,true end
+    return nil,false
+end
+function Materials.New(ctx)
+    local ok,service=pcall(game.GetService,game,'MaterialService')
+    local self={Alive=true,Service=ctx.Service or (ok and service),Entries={},Status='Rescan MaterialService to browse material variants.'}
+    function self:Changed(message) self.Status=message;if self.OnChanged then self.OnChanged() end end
+    function self:Scan()
+        if not self.Service then self:Changed('MaterialService is unavailable in this runtime.');return false end
+        local scanned,objects=pcall(self.Service.GetDescendants,self.Service)
+        if not scanned then self:Changed('Material scan failed: '..tostring(objects):sub(1,180));return false end
+        local entries={}
+        for _,object in ipairs(objects) do if object:IsA('MaterialVariant') and object.Parent then entries[#entries+1]=object end end
+        table.sort(entries,function(a,b) return a:GetFullName()<b:GetFullName() end)
+        self.Entries=entries
+        if self.Selected and (not self.Selected.Parent or not self.Selected:IsDescendantOf(self.Service)) then self.Selected=nil end
+        self:Changed(#entries..' loaded MaterialVariant(s). Built-in materials do not expose separate texture-map instances.');return true
+    end
+    function self:Select(object)
+        self.Selected=object;self:Changed(object and (object.Name..'\n'..object:GetFullName()) or 'Choose a material variant.')
+    end
+    function self:Inspect()
+        local object=self.Selected
+        if not object or not object.Parent then self.Selected=nil;return nil end
+        local data={Name=object.Name,Path=object:GetFullName(),Maps={}}
+        for _,key in ipairs({'BaseMaterial','StudsPerTile','MaterialPattern','CustomPhysicalProperties'}) do local value,readable=Materials.Read(object,key);data[key]=readable and value~=nil and tostring(value) or 'Unavailable' end
+        for _,map in ipairs(maps) do
+            local value,readable=Materials.Read(object,map.Key)
+            local uri=readable and type(value)=='string' and value~='' and value~='rbxassetid://0' and value or nil
+            data.Maps[map.Key]={URI=uri,State=not readable and 'Not readable in this runtime' or uri and uri or 'Not set'}
+        end
+        return data
+    end
+    function self:ExportTargets(all)
+        if not self.Service then self:Changed('MaterialService is unavailable.');return {} end
+        if all then
+            local scanned,children=pcall(self.Service.GetChildren,self.Service)
+            if not scanned then self:Changed('Could not read MaterialService children.');return nil end
+            return children
+        end
+        if self.Selected and self.Selected.Parent and self.Selected:IsDescendantOf(self.Service) then return {self.Selected} end
+        self.Selected=nil;self:Changed('Choose a loaded material variant first.');return {}
+    end
+    function self:Settings()
+        local folder=Instance.new('Folder');folder.Name='MaterialServiceSettings'
+        local ok,err=pcall(function()
+            local modern,readable=Materials.Read(self.Service,'Use2022Materials')
+            if readable and type(modern)=='boolean' then local item=Instance.new('BoolValue');item.Name='Use2022Materials';item.Value=modern;item.Parent=folder end
+            local overrides=Instance.new('Folder');overrides.Name='BaseMaterialOverrides';overrides.Parent=folder
+            local got,items=pcall(function() return Enum.Material:GetEnumItems() end)
+            if got then for _,material in ipairs(items) do
+                local read,name=pcall(self.Service.GetBaseMaterialOverride,self.Service,material)
+                if read and type(name)=='string' and name~='' then local item=Instance.new('StringValue');item.Name=material.Name;item.Value=name;item.Parent=overrides end
+            end end
+        end)
+        if not ok then folder:Destroy();error(err) end
+        return folder
+    end
+    function self:Manifest()
+        local data=self:Inspect();if not data then return end
+        local lines={data.Name,data.Path,'Base material: '..data.BaseMaterial,'Studs per tile: '..data.StudsPerTile,'Pattern: '..data.MaterialPattern}
+        for _,map in ipairs(maps) do lines[#lines+1]=map.Title..': '..data.Maps[map.Key].State end
+        return table.concat(lines,'\n')
+    end
+    function self:Unload() self.Alive=false;self.OnChanged=nil;self.Selected=nil;self.Entries={} end
+    return self
+end
+function Materials.Build(ctx)
+    local self=Materials.New(ctx);local tab=ctx.Tab:Section({Title='MaterialService export',Icon='paint-bucket',Opened=false,Box=true})
+    tab:Paragraph({Title='Materials and texture maps',Desc='Browse MaterialVariants in MaterialService, including nested folders. Inspect base color, metalness, roughness and normal map images and IDs. Texture loading and property access depend on the runtime and asset permissions.'})
+    local status=tab:Paragraph({Title='Material status',Desc=self.Status})
+    local picker
+    local entries,views={},{}
+    local info=tab:Paragraph({Title='Material details',Desc='Choose a variant to inspect its maps and tiling.'})
+    for _,map in ipairs(maps) do views[map.Key]=tab:Paragraph({Title=map.Title..' map',Desc='No material selected.',ImageSize=112}) end
+    local previous={}
+    local function image(panel,uri,key)
+        local frame=panel.ParagraphFrame or panel
+        if frame.SetImage then frame:SetImage(uri,112) end
+        local container=frame.UIElements and frame.UIElements.Container
+        if container and previous[key] then
+            -- WindUI leaves the previous image visible after SetImage(nil).
+            for _,object in ipairs(container:GetDescendants()) do
+                if object:IsA('ImageLabel') and object.Image==previous[key] and not uri then object.Image='';if object.Parent then object.Parent.Visible=false end end
+            end
+        end
+        if container and uri then for _,object in ipairs(container:GetDescendants()) do if object:IsA('ImageLabel') and object.Image==uri then object.ScaleType=Enum.ScaleType.Fit end end end
+        previous[key]=uri
+    end
+    local function render()
+        status:SetDesc(self.Status)
+        local data=self:Inspect()
+        info:SetDesc(data and (data.Path..'\nBase material: '..data.BaseMaterial..' · Studs per tile: '..data.StudsPerTile..'\nPattern: '..data.MaterialPattern..'\nPhysical properties: '..data.CustomPhysicalProperties) or 'Choose a loaded material variant.')
+        for _,map in ipairs(maps) do local state=data and data.Maps[map.Key];views[map.Key]:SetDesc((state and state.State or 'No material selected.')..'\n'..map.Help);image(views[map.Key],state and state.URI or nil,map.Key) end
+    end
+    self.OnChanged=render
+    local function refresh()
+        if not self:Scan() then return end
+        local values={};entries={}
+        for index,object in ipairs(self.Entries) do local key=index..' / '..object.Name..' ['..tostring(Materials.Read(object,'BaseMaterial'))..'] / '..object:GetFullName();values[#values+1]=key;entries[key]=object end
+        picker:Refresh(#values>0 and values or {'No loaded material variants'})
+        local key=values[1]
+        for name,object in pairs(entries) do if object==self.Selected then key=name;break end end
+        picker:Select(key or 'No loaded material variants');self:Select(key and entries[key] or nil)
+    end
+    picker=tab:Dropdown({Title='Material variant',SearchBarEnabled=true,Values={'Rescan to find materials'},Value='Rescan to find materials',Callback=function(value) self:Select(entries[value]) end})
+    tab:Button({Title='Rescan materials',Icon='refresh-cw',Callback=refresh})
+    tab:Button({Title='Refresh material maps',Callback=function() self:Changed('Material maps refreshed. Images may fail to load if asset access is restricted.') end})
+    local chosen='ColorMap'
+    local labels={};for _,map in ipairs(maps) do labels[#labels+1]=map.Title end
+    tab:Dropdown({Title='Texture map to copy',Values=labels,Value='Base color',Callback=function(value) for _,map in ipairs(maps) do if map.Title==value then chosen=map.Key end end end})
+    tab:Button({Title='Copy texture map ID',Icon='copy',Callback=function()
+        local data=self:Inspect();local uri=data and data.Maps[chosen].URI
+        if not uri then ctx.Notify('This texture map is not set or not readable.');return end
+        local copied=type(setclipboard)=='function' and pcall(setclipboard,uri);ctx.Notify(copied and 'Texture asset URI copied.' or 'Clipboard unavailable.')
+    end})
+    tab:Button({Title='Copy material details',Callback=function() local text=self:Manifest();if not text then ctx.Notify('Choose a material first.');return end;local copied=type(setclipboard)=='function' and pcall(setclipboard,text);ctx.Notify(copied and 'Material details copied.' or 'Clipboard unavailable.') end})
+    tab:Button({Title='Export selected material',Icon='download',Desc='Save this MaterialVariant and its descendants as .rbxm.',Callback=function() ctx.Export('Material') end})
+    tab:Button({Title='Export all MaterialService',Icon='download',Desc='Save every service child and its descendants in one file, plus readable service settings and base-material override names. Texture assets remain references.',Callback=function() ctx.Export('All materials') end})
+    return self
+end
+return Materials
+
+end)()
 createAnimations = (function()
 local Animations={}
 local locomotion={idle=true,walk=true,run=true,jump=true,fall=true,climb=true,swim=true,swimidle=true,sit=true}
@@ -2621,8 +2751,11 @@ local function exportSelection(category)
     refreshSelection()
     local eligible, targets = {}, {}
     local lightingOnly=category=="Lighting"
-    local bulk=lightingOnly or category=="Skies" or category=="All VFX" or category=="All VFX original" or category=="All animations"
-    if category=="Animation clip" then
+    local bulk=lightingOnly or category=="Skies" or category=="All VFX" or category=="All VFX original" or category=="All animations" or category=="All materials"
+    if category=="Material" or category=="All materials" then
+        eligible=Session.Materials:ExportTargets(category=="All materials")
+        if not eligible then exportMessage("Material scan failed",Session.Materials.Status);return end
+    elseif category=="Animation clip" then
         local clip=Session.Animations:FetchClip()
         if not clip then exportMessage("Animation data unavailable",Session.Animations.Status);return end
         if exportBusy then exportMessage("Export busy","Another export started while animation data was loading. Retry when it finishes.");return end
@@ -2648,7 +2781,7 @@ local function exportSelection(category)
         end
         if not covered then targets[#targets + 1] = target end
     end
-    if #targets == 0 and not lightingOnly then exportMessage("Nothing to export",(category=="Animation" or category=="All animations") and "Choose or scan a loaded animation first." or  (category=="Skies") and "No loaded skies were found in Lighting." or (category=="All VFX" or category=="All VFX original") and "No loaded supported VFX were found." or (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
+    if #targets == 0 and not lightingOnly and not (category=="All materials" and Session.Materials.Service) then exportMessage("Nothing to export",(category=="Material" or category=="All materials") and Session.Materials.Status or (category=="Animation" or category=="All animations") and "Choose or scan a loaded animation first." or  (category=="Skies") and "No loaded skies were found in Lighting." or (category=="All VFX" or category=="All VFX original") and "No loaded supported VFX were found." or (category == "VFX" or category == "VFX original") and "Rescan and choose a VFX entry first." or category == "Sound" and "Rescan and choose a loaded audio object first." or category == "Game UI" and "No loaded game ScreenGuis were found in PlayerGui." or "Select models or parts first."); return end
     if not writefile then exportMessage("Export unavailable", "Your runtime needs writefile to save .rbxm files."); return end
     local batches = {}
     if not bulk and category ~= "Game UI" and exportLayout == "Separate files" then
@@ -2656,7 +2789,7 @@ local function exportSelection(category)
     else batches[1] = targets end
     local filename = customFilename
     if category == "Game UI" and filename == "" then filename = "GameUI-" .. game.PlaceId end
-    if bulk and filename=="" then filename=(lightingOnly and "Lighting" or category=="Skies" and "Skies" or category=="All animations" and "Animations" or "AllVFX").."-"..game.PlaceId end
+    if bulk and filename=="" then filename=(lightingOnly and "Lighting" or category=="Skies" and "Skies" or category=="All animations" and "Animations" or category=="All materials" and "Materials" or "AllVFX").."-"..game.PlaceId end
     exportBusy, cancelExport = true, false
     exportMessage("Preparing export", #targets .. " root(s), " .. #batches .. " file(s). Loading the exporter...")
     task.spawn(function()
@@ -2683,6 +2816,7 @@ local function exportSelection(category)
                         allUI, anyUI = allUI and ui, anyUI or ui
                         saveTargets[#saveTargets + 1] = target
                     end
+                    if category=="All materials" then local settings=Session.Materials:Settings();temporary[#temporary+1]=settings;saveTargets[#saveTargets+1]=settings end
                     if lightingOnly then local settings=lightingSettings();temporary[#temporary+1]=settings;saveTargets[#saveTargets+1]=settings end
                     if category=="All VFX" then
                         saveTargets={}
@@ -2692,7 +2826,7 @@ local function exportSelection(category)
                         end
                     end
                     if category == "VFX" then exportRig = buildVfxRig(batch[1], false); saveTargets = { exportRig.Model } end
-                    local group = (category=="Animation" or category=="Animation clip" or category=="All animations") and "Animations" or (lightingOnly or category=="Skies") and "Lighting" or (category == "VFX" or category == "VFX original" or category=="All VFX" or category=="All VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
+                    local group = (category=="Material" or category=="All materials") and "Materials" or (category=="Animation" or category=="Animation clip" or category=="All animations") and "Animations" or (lightingOnly or category=="Skies") and "Lighting" or (category == "VFX" or category == "VFX original" or category=="All VFX" or category=="All VFX original") and "VFX" or category == "Sound" and "Sounds" or (allUI and "UI" or (anyUI and "Mixed" or "Models"))
                     local name = filename ~= "" and filename or (#batch == 1 and batch[1].Name or "Selection-" .. #batch)
                     if filename ~= "" and #batches > 1 then name = name .. "-" .. index .. "-" .. batch[1].Name end
                     local safeName = name:gsub("[^%w_-]", "_"):sub(1, 64)
@@ -3426,6 +3560,8 @@ local function build()
         local copied = pcall(setclipboard, vfxChoice:GetFullName())
         notify(copied and "Effect path copied." or "Could not copy effect path.")
     end })
+    Session.Materials=createMaterials.Build({Tab=assets,Notify=notify,Export=exportSelection})
+    table.insert(cleanups,function() Session.Materials:Unload() end)
     Session.Animations=createAnimations.Build({Tab=assets,Player=Player,RunService=RunService,Notify=notify,IsInternal=ownUI,Export=exportSelection})
     table.insert(cleanups,function() Session.Animations:Unload() end)
     exportStatus = assets:Paragraph({ Title = "Picker off", Desc = "Select models with the picker, or use Export whole game UI." })
@@ -4062,6 +4198,7 @@ local Extras = {}
 local settingsFile = "Paraware-settings.json"
 local defaults = { Glass = true, Blur = true, AutoGame = true, ToggleKey = "RightShift", FlyKey = "F", Sounds = true, SoundVolume = 0.35, ReducedMotion = false }
 local history = {
+    {Version="2.10.0",Date="2026-10-07",Title="MaterialService browser and export",Changes="Single/whole-service material export, base color/metalness/roughness/normal previews, map IDs, tiling details and service override settings."},
     {Version="2.9.0",Date="2026-10-06",Title="Animation categories and custom character slots",Changes="Separated character, in-game and emote browsing/exports; added reversible custom Animate movement-slot replacement."},
     {Version="2.8.0",Date="2026-10-06",Title="Animation browser and preview",Changes="Loaded/playing animation discovery, character previews with playback controls, ID copy, selected/all references and optional allowed animation-data exports."},
     {Version="2.7.0",Date="2026-10-06",Title="Bulk lighting and VFX exports",Changes="Export all Lighting children and readable service settings, all skies, all loaded VFX rigs or original effect objects into one file."},
