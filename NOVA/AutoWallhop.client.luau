@@ -3,8 +3,9 @@
     Roblox Studio • LocalScript • StarterPlayer > StarterPlayerScripts
 
     This is a game-side assisted wall-jump mechanic for an experience you develop.
-    It is NOT a universal executor script or an implementation of the
-    camera-flick collision glitch used in some third-party obbies.
+    Classic-mode assist: detects adjoining wall Parts and briefly rotates
+    the character at the seam. Uses normal humanoid jumps (no velocity boost).
+    Real wallhop collision behaviour depends on the game's wall geometry.
 
     Keybinds:
        G          Toggle assistance
@@ -31,11 +32,11 @@ if existing then existing:Destroy() end
 -- User settings
 local settings = {
     enabled = true,
-    power = 68,                 -- 0–100
-    distance = 4.0,            -- 2.0–6.0 studs
-    maxChain = 3,              -- 1–3 airborne hops
-    cooldown = 0.27,           -- seconds between hops
-    scanInterval = 0.045,      -- seconds between wall queries
+    angle = 45,                -- brief character-facing flick in degrees
+    distance = 2.8,            -- short range improves seam precision
+    maxChain = math.huge,      -- keep climbing until grounded
+    cooldown = 0.16,          -- minimum interval between flick attempts
+    scanInterval = 0.018,      -- seam scan frequency
 }
 
 -- Visual palette
@@ -217,7 +218,7 @@ local heroGlyph = label(heroIconBox, "↗", UDim2.fromScale(0, 0), UDim2.fromSca
 heroGlyph.TextXAlignment = Enum.TextXAlignment.Center
 
 label(hero, "AUTO WALLHOP", UDim2.fromOffset(79, 17), UDim2.fromOffset(200, 24), 15, C.white, true)
-label(hero, "Proximity-based movement assist", UDim2.fromOffset(79, 42), UDim2.fromOffset(225, 19), 10, C.muted)
+label(hero, "Seam-based flicks · native jump physics", UDim2.fromOffset(79, 42), UDim2.fromOffset(225, 19), 10, C.muted)
 
 local statusDot = create("Frame", hero, {
     Position = UDim2.fromOffset(81, 78),
@@ -255,7 +256,7 @@ local scanner = create("Frame", main, {
 })
 corners(scanner, 14)
 outline(scanner, C.border, 0.55)
-label(scanner, "PROXIMITY SENSOR", UDim2.fromOffset(16, 11), UDim2.fromOffset(190, 21), 10, C.muted, true)
+label(scanner, "SEAM DETECTOR", UDim2.fromOffset(16, 11), UDim2.fromOffset(190, 21), 10, C.muted, true)
 local scanState = label(scanner, "SEARCHING", UDim2.fromOffset(16, 30), UDim2.fromOffset(230, 28), 17, C.white, true)
 local scanDistance = label(scanner, "-- STUDS", UDim2.fromOffset(252, 30), UDim2.fromOffset(87, 28), 10, C.muted, true)
 scanDistance.TextXAlignment = Enum.TextXAlignment.Right
@@ -342,22 +343,23 @@ local function makeSlider(title, y, minVal, maxVal, initial, formatValue, onChan
     setValue(initial)
 end
 
-makeSlider("LAUNCH POWER", 320, 0, 100, settings.power,
-    function(v) return string.format("%d%%", math.floor(v + 0.5)) end,
-    function(v) settings.power = math.floor(v + 0.5) end)
-makeSlider("DETECTION RANGE", 398, 2, 6, settings.distance,
+makeSlider("FLICK ANGLE", 320, 25, 75, settings.angle,
+    function(v) return string.format("%d°", math.floor(v + 0.5)) end,
+    function(v) settings.angle = math.floor(v + 0.5) end)
+makeSlider("DETECTION RANGE", 398, 1.4, 4.2, settings.distance,
     function(v) return string.format("%.1f studs", v) end,
     function(v) settings.distance = v end)
 
-label(main, "CHAIN LIMIT", UDim2.fromOffset(23, 476), UDim2.fromOffset(174, 24), 11, C.muted, true)
+label(main, "HOP LIMIT", UDim2.fromOffset(23, 476), UDim2.fromOffset(174, 24), 11, C.muted, true)
 local chainButtons = {}
+local chainChoices = { 1, 3, math.huge }
 for i = 1, 3 do
     local button = create("TextButton", main, {
         Name = "Chain" .. i,
         Position = UDim2.fromOffset(222 + (i - 1) * 52, 475),
         Size = UDim2.fromOffset(45, 30),
         BackgroundColor3 = C.elevated,
-        Text = tostring(i),
+        Text = (i == 3) and "∞" or tostring(chainChoices[i]),
         TextColor3 = C.muted,
         Font = Enum.Font.GothamBold,
         TextSize = 12,
@@ -368,7 +370,7 @@ for i = 1, 3 do
     local stroke = outline(button, C.border, 0.55)
     chainButtons[i] = { button = button, stroke = stroke }
     button.Activated:Connect(function()
-        settings.maxChain = i
+        settings.maxChain = chainChoices[i]
         for j, data in ipairs(chainButtons) do
             animate(data.button, {
                 BackgroundColor3 = (j == i) and C.accent or C.elevated,
@@ -453,7 +455,7 @@ header.InputBegan:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
+local dragChangedConnection = UserInputService.InputChanged:Connect(function(input)
     if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - dragOrigin
         local goal = UDim2.new(
@@ -466,14 +468,14 @@ UserInputService.InputChanged:Connect(function(input)
     for _, reference in ipairs(sliderRefs) do reference.update(input) end
 end)
 
-UserInputService.InputEnded:Connect(function(input)
+local dragEndedConnection = UserInputService.InputEnded:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
         dragging = false
     end
     for _, reference in ipairs(sliderRefs) do reference.release(input) end
 end)
 
-UserInputService.InputBegan:Connect(function(input, processed)
+local keyConnection = UserInputService.InputBegan:Connect(function(input, processed)
     if processed or UserInputService:GetFocusedTextBox() then return end
     if input.KeyCode == Enum.KeyCode.G then
         settings.enabled = not settings.enabled
@@ -493,38 +495,100 @@ local function updateScale()
     shadowScale.Scale = nextScale
 end
 updateScale()
-Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(updateScale)
+local cameraChangedConnection = Workspace:GetPropertyChangedSignal("CurrentCamera"):Connect(updateScale)
 local camera = Workspace.CurrentCamera
-if camera then camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale) end
+local viewportConnection = camera and camera:GetPropertyChangedSignal("ViewportSize"):Connect(updateScale)
 
--- Character binding / respawn support
+-- CLASSIC WALLHOP ENGINE (NOVA v2)
+-- Actual Roblox-style wallhops depend on joints between collidable Parts.
+-- This mode does not teleport, change gravity, or set AssemblyLinearVelocity.
+-- It turns the character briefly at a detected seam and buffers a normal jump.
+
+local alive = true
+local connections = {}
+local function track(connection)
+    table.insert(connections, connection)
+    return connection
+end
+
 local character, humanoid, root
-local groundedAt = os.clock()
-local lastHopAt = -math.huge
-local hopsThisAir = 0
+local stateConnection
+local lastAttemptAt = -math.huge
+local lastGroundJumpAt = -math.huge
+local lastSuccessAt = -math.huge
+local lastSeamAt = -math.huge
+local lastSeamPart = nil
+local lastSeamY = nil
+local groundedSince = nil
+local jumpsThisAir = 0
 local totalHops = 0
-local lastFlashAt = -math.huge
+local pendingUntil = 0
 local nextScanAt = 0
-local latestHit = nil
+local nextUiAt = 0
+local lastWall = nil
+local lastScan = nil
+local flick = nil
+local flickSide = 1
 
 local rayParams = RaycastParams.new()
 rayParams.FilterType = Enum.RaycastFilterType.Exclude
 rayParams.IgnoreWater = true
+rayParams.RespectCanCollide = true
+
+local function cancelFlick()
+    if not flick then return end
+    local saved = flick
+    flick = nil
+    if saved.root and saved.root.Parent then
+        saved.root.CFrame = CFrame.new(saved.root.Position) * saved.rotation
+    end
+    if saved.humanoid and saved.humanoid.Parent then
+        saved.humanoid.AutoRotate = saved.autoRotate
+    end
+end
 
 local function bindCharacter(model)
+    cancelFlick()
+    if stateConnection then stateConnection:Disconnect() end
     character = model
     humanoid = model:WaitForChild("Humanoid")
     root = model:WaitForChild("HumanoidRootPart")
     rayParams.FilterDescendantsInstances = { model }
-    groundedAt = os.clock()
-    lastHopAt = -math.huge
-    hopsThisAir = 0
-    latestHit = nil
-end
-player.CharacterAdded:Connect(bindCharacter)
-if player.Character then bindCharacter(player.Character) end
+    lastAttemptAt = -math.huge
+    lastGroundJumpAt = -math.huge
+    lastSeamPart = nil
+    lastSeamY = nil
+    jumpsThisAir = 0
+    groundedSince = os.clock()
+    pendingUntil = 0
+    lastScan = nil
+    lastWall = nil
 
-local function validMovementState()
+    -- Count ONLY confirmed Humanoid jumps caused by a buffered wallhop.
+    stateConnection = humanoid.StateChanged:Connect(function(_, newState)
+        if not alive then return end
+        if newState == Enum.HumanoidStateType.Jumping and os.clock() <= pendingUntil then
+            pendingUntil = 0
+            jumpsThisAir += 1
+            totalHops += 1
+            lastSuccessAt = os.clock()
+            hopsLabel.Text = string.format("HOPS  %03d", totalHops % 1000)
+            animate(heroIconBox, { BackgroundTransparency = 0.57 }, 0.07)
+            task.delay(0.16, function()
+                if alive and heroIconBox.Parent then
+                    animate(heroIconBox, { BackgroundTransparency = settings.enabled and 0.87 or 0.94 }, 0.18)
+                end
+            end)
+        end
+    end)
+end
+
+track(player.CharacterAdded:Connect(bindCharacter))
+if player.Character then
+    bindCharacter(player.Character)
+end
+
+local function ableToHop()
     if not humanoid or humanoid.Health <= 0 or not root or not root.Parent then return false end
     local state = humanoid:GetState()
     return state ~= Enum.HumanoidStateType.Dead
@@ -535,140 +599,225 @@ local function validMovementState()
         and state ~= Enum.HumanoidStateType.Physics
 end
 
-local function scanWall()
-    if not root or not humanoid then return nil end
-    local motion = humanoid.MoveDirection
-    if motion.Magnitude < 0.15 then return nil end
-    local direction = Vector3.new(motion.X, 0, motion.Z)
-    if direction.Magnitude < 0.1 then return nil end
-    direction = direction.Unit
-
-    -- Three heights improve detection across R6/R15 and uneven surfaces.
-    local center = root.Position
-    local starts = {
-        center + Vector3.new(0, 1.25, 0),
-        center + Vector3.new(0, 0.1, 0),
-        center + Vector3.new(0, -1.15, 0),
-    }
-    local nearest = nil
-    for _, start in ipairs(starts) do
-        local result = Workspace:Raycast(start, direction * settings.distance, rayParams)
-        if result
-            and result.Instance.CanCollide
-            and math.abs(result.Normal.Y) <= 0.22
-            and direction:Dot(-result.Normal) > 0.35 then
-            if not nearest or result.Distance < nearest.Distance then
-                nearest = result
-            end
-        end
+local function getFootY()
+    if humanoid.RigType == Enum.HumanoidRigType.R6 then
+        return root.Position.Y - 2.85
     end
-    return nearest
+    return root.Position.Y - humanoid.HipHeight - root.Size.Y * 0.5
 end
 
-local function performWallhop(hit, now)
-    if not root or not humanoid then return end
-    local current = root.AssemblyLinearVelocity
-    local wallNormal = Vector3.new(hit.Normal.X, 0, hit.Normal.Z)
-    if wallNormal.Magnitude < 0.1 then return end
-    wallNormal = wallNormal.Unit
-
-    -- Retain movement parallel to wall, then add a small outward kick.
+local function directionIntoWall()
     local move = humanoid.MoveDirection
-    local parallel = move - wallNormal * move:Dot(wallNormal)
-    if parallel.Magnitude > 0.1 then
-        parallel = parallel.Unit * 18
-    else
-        parallel = Vector3.zero
-    end
-
-    local lateralCurrent = Vector3.new(current.X, 0, current.Z)
-    local lateralPreserved = lateralCurrent * 0.4
-    local outward = wallNormal * (11 + settings.power * 0.075)
-    local horizontal = parallel + lateralPreserved + outward
-    if horizontal.Magnitude > 35 then horizontal = horizontal.Unit * 35 end
-
-    -- Gravity-aware jump height: moderate upward boost, not arbitrary teleportation.
-    local jumpHeight = 6.3 + (settings.power / 100) * 5.7
-    local verticalSpeed = math.sqrt(2 * Workspace.Gravity * jumpHeight)
-    root.AssemblyLinearVelocity = Vector3.new(horizontal.X, verticalSpeed, horizontal.Z)
-    humanoid:ChangeState(Enum.HumanoidStateType.Freefall)
-
-    lastHopAt = now
-    lastFlashAt = now
-    hopsThisAir += 1
-    totalHops += 1
-    hopsLabel.Text = string.format("HOPS  %03d", totalHops % 1000)
-    animate(heroIconBox, { BackgroundTransparency = 0.56 }, 0.08)
-    task.delay(0.19, function()
-        if heroIconBox.Parent then
-            animate(heroIconBox, { BackgroundTransparency = settings.enabled and 0.87 or 0.94 }, 0.28)
-        end
-    end)
+    if move.Magnitude < 0.14 then return nil end -- Hold forward into the wall.
+    return Vector3.new(move.X, 0, move.Z).Unit
 end
 
--- Scans are throttled; UI and physics use the same result.
-RunService.Heartbeat:Connect(function()
-    local now = os.clock()
-    if not validMovementState() then
-        latestHit = nil
-        scanState.Text = "AWAITING PLAYER"
-        scanState.TextColor3 = C.muted
-        scanDistance.Text = "-- STUDS"
-        meterFill.Size = UDim2.fromScale(0, 1)
+local function validFace(hit, direction)
+    return hit and hit.Instance and hit.Instance:IsA("BasePart")
+        and hit.Instance.CanCollide
+        and math.abs(hit.Normal.Y) < 0.13
+        and direction:Dot(-hit.Normal) > 0.48
+end
+
+-- Detect a real horizontal join: consecutive sample rays must hit DISTINCT
+-- BaseParts, with almost identical normals and front-face depth.
+-- A striped Decal/Texture on one solid Part will NOT count as a seam.
+local function scanSeam()
+    local direction = directionIntoWall()
+    if not direction then return nil end
+
+    local footY = getFootY()
+    local offsets = { -0.52, -0.33, -0.17, 0.00, 0.17, 0.33, 0.52, 0.70, 0.91 }
+    local previous, previousY
+    local nearestWall, bestSeam
+    for _, offset in ipairs(offsets) do
+        local origin = Vector3.new(root.Position.X, footY + offset, root.Position.Z)
+        local hit = Workspace:Raycast(origin, direction * settings.distance, rayParams)
+        local y = footY + offset
+        if not validFace(hit, direction) then
+            previous = nil
+        else
+            if not nearestWall or hit.Distance < nearestWall.Distance then
+                nearestWall = hit
+            end
+            if previous and hit.Instance ~= previous.Instance
+                and hit.Normal:Dot(previous.Normal) > 0.985
+                and math.abs(hit.Distance - previous.Distance) < 0.20 then
+                local seamY = (previousY + y) * 0.5
+                local offsetFromFoot = math.abs(seamY - footY)
+                if not bestSeam or offsetFromFoot < bestSeam.footGap then
+                    bestSeam = {
+                        lower = previous,
+                        upper = hit,
+                        part = hit.Instance,
+                        y = seamY,
+                        footGap = offsetFromFoot,
+                        distance = math.min(hit.Distance, previous.Distance),
+                    }
+                end
+            end
+            previous, previousY = hit, y
+        end
+    end
+
+    return { wall = nearestWall, seam = bestSeam, footY = footY }
+end
+
+local function initiateFlick(now, scan)
+    local seam = scan.seam
+    if not seam or flick or jumpsThisAir >= settings.maxChain then return end
+    if now - lastAttemptAt < settings.cooldown then return end
+    if seam.footGap > 0.37 then return end
+    if lastSeamPart == seam.part and lastSeamY
+        and math.abs(lastSeamY - seam.y) < 0.20
+        and now - lastSeamAt < 0.65 then
         return
     end
 
-    local isGrounded = humanoid.FloorMaterial ~= Enum.Material.Air
-    if isGrounded then
-        groundedAt = now
-        hopsThisAir = 0
-    end
+    -- Direct rotation emulates the character-facing part of a shift-lock
+    -- camera flick, but does not create fake upward speed or wall forces.
+    flickSide = -flickSide
+    flick = {
+        root = root,
+        humanoid = humanoid,
+        rotation = root.CFrame.Rotation,
+        autoRotate = humanoid.AutoRotate,
+        untilTime = now + 0.048,
+    }
+    humanoid.AutoRotate = false
+    root.CFrame = CFrame.new(root.Position)
+        * flick.rotation
+        * CFrame.Angles(0, math.rad(settings.angle * flickSide), 0)
+    humanoid.Jump = true -- Accepted only when Roblox grants jump contact.
 
-    if now < nextScanAt then return end
-    nextScanAt = now + settings.scanInterval
+    lastAttemptAt = now
+    lastSeamAt = now
+    lastSeamPart = seam.part
+    lastSeamY = seam.y
+    pendingUntil = now + 0.24
+end
 
+local function updateInterface(now, scan, ground)
+    if now < nextUiAt then return end
+    nextUiAt = now + 0.08
+
+    local hit = scan and scan.wall
+    local seam = scan and scan.seam
     if not settings.enabled then
-        latestHit = nil
         scanState.Text = "STANDBY"
         scanState.TextColor3 = C.off
         scanDistance.Text = "-- STUDS"
         meterFill.Size = UDim2.fromScale(0, 1)
+    elseif not ableToHop() then
+        scanState.Text = "AWAITING PLAYER"
+        scanState.TextColor3 = C.muted
+        scanDistance.Text = "-- STUDS"
+        meterFill.Size = UDim2.fromScale(0, 1)
+    elseif not hit then
+        scanState.Text = ground and "APPROACH WALL" or "SEARCHING"
+        scanState.TextColor3 = C.muted
+        scanDistance.Text = "-- STUDS"
+        meterFill.Size = UDim2.fromScale(0, 1)
+    else
+        scanDistance.Text = string.format("%.1f STUDS", hit.Distance)
+        meterFill.Size = UDim2.fromScale(math.clamp(1 - hit.Distance / settings.distance, 0.04, 1), 1)
+        if now - lastSuccessAt < 0.34 then
+            scanState.Text = "HOP CONFIRMED"
+            scanState.TextColor3 = C.accent
+        elseif seam and jumpsThisAir >= settings.maxChain and not ground then
+            scanState.Text = "LIMIT REACHED"
+            scanState.TextColor3 = C.warning
+        elseif seam and flick then
+            scanState.Text = "FLICKING"
+            scanState.TextColor3 = C.accent
+        elseif seam and seam.footGap <= 0.37 then
+            scanState.Text = "SEAM ALIGNED"
+            scanState.TextColor3 = C.accent
+        elseif seam then
+            scanState.Text = "SEAM DETECTED"
+            scanState.TextColor3 = C.accent2
+        else
+            scanState.Text = "SOLID WALL"
+            scanState.TextColor3 = C.warning
+        end
+    end
+end
+
+local engineConnection = RunService.PreSimulation:Connect(function()
+    if not alive then return end
+    local now = os.clock()
+
+    if flick then
+        if not settings.enabled or not ableToHop() or now >= flick.untilTime then
+            cancelFlick()
+        else
+            -- Keep the regular jump buffer active while seam physics resolves.
+            humanoid.Jump = true
+        end
+    end
+
+    if not ableToHop() then
+        lastScan = nil
+        updateInterface(now, nil, false)
         return
     end
 
-    latestHit = scanWall()
-    if latestHit then
-        scanDistance.Text = string.format("%.1f STUDS", latestHit.Distance)
-        local closeness = 1 - (latestHit.Distance / settings.distance)
-        animate(meterFill, { Size = UDim2.fromScale(math.clamp(closeness, 0.06, 1), 1) }, 0.09)
-        if now - lastFlashAt < 0.35 then
-            scanState.Text = "HOP EXECUTED"
-            scanState.TextColor3 = C.accent
-        elseif hopsThisAir >= settings.maxChain and not isGrounded then
-            scanState.Text = "CHAIN EXHAUSTED"
-            scanState.TextColor3 = C.warning
-        elseif isGrounded then
-            scanState.Text = "WALL IN RANGE"
-            scanState.TextColor3 = C.accent2
-        else
-            scanState.Text = "TARGET LOCKED"
-            scanState.TextColor3 = C.accent
+    local grounded = humanoid.FloorMaterial ~= Enum.Material.Air
+    if grounded then
+        groundedSince = groundedSince or now
+        -- A genuine wallhop can report a 1-frame floor contact at a seam.
+        -- Only reset a chain after a sustained real ground contact.
+        if now - groundedSince > 0.17 then
+            jumpsThisAir = 0
+            lastSeamPart = nil
+            lastSeamY = nil
         end
     else
-        scanState.Text = isGrounded and "READY TO JUMP" or "SEARCHING"
-        scanState.TextColor3 = C.white
-        scanDistance.Text = "-- STUDS"
-        animate(meterFill, { Size = UDim2.fromScale(0, 1) }, 0.12)
+        groundedSince = nil
     end
 
-    if not latestHit or isGrounded then return end
-    if hopsThisAir >= settings.maxChain then return end
-    if now - lastHopAt < settings.cooldown then return end
-    if now - groundedAt < 0.13 then return end
+    if not settings.enabled then
+        lastScan = nil
+        updateInterface(now, nil, grounded)
+        return
+    end
 
-    -- Don't fire just after a regular jump, or during dangerous terminal falls.
-    local ySpeed = root.AssemblyLinearVelocity.Y
-    if ySpeed > 16 or ySpeed < -85 then return end
+    if now >= nextScanAt then
+        nextScanAt = now + settings.scanInterval
+        lastScan = scanSeam()
+    end
 
-    performWallhop(latestHit, now)
+    local scan = lastScan
+    if scan and scan.seam and not flick then
+        if grounded then
+            -- Automatically initiate an ordinary jump at an actual seam.
+            if now - lastGroundJumpAt >= 0.46 and scan.seam.footGap < 0.87 then
+                humanoid.Jump = true
+                lastGroundJumpAt = now
+            end
+        else
+            -- Classic wallhops are typically caught as the legs descend
+            -- through the shared edge between stacked wall Parts.
+            local vy = root.AssemblyLinearVelocity.Y
+            if vy <= 4 and vy > -62 then
+                initiateFlick(now, scan)
+            end
+        end
+    end
+    updateInterface(now, scan, grounded)
+end)
+track(engineConnection)
+
+screen.Destroying:Connect(function()
+    alive = false
+    cancelFlick()
+    if stateConnection then stateConnection:Disconnect() end
+    for _, connection in ipairs(connections) do
+        connection:Disconnect()
+    end
+    if dragChangedConnection then dragChangedConnection:Disconnect() end
+    if dragEndedConnection then dragEndedConnection:Disconnect() end
+    if keyConnection then keyConnection:Disconnect() end
+    if cameraChangedConnection then cameraChangedConnection:Disconnect() end
+    if viewportConnection then viewportConnection:Disconnect() end
 end)
